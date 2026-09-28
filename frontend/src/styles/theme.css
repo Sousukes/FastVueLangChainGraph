@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Noto+Sans+SC:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+SC:wght@400;500&family=JetBrains+Mono:wght@400;600&display=swap');
+
+:root {
+  --ink: #0E1116;
+  --panel: #161B22;
+  --panel-2: #1C2230;
+  --paper: #E6E9EF;
+  --muted: #8B95A7;
+  --signal: #FFB454;
+  --data: #5BC8B0;
+  --line: #2A2F3A;
+
+  --font-display: 'Space Grotesk', 'Noto Sans SC', sans-serif;
+  --font-body: 'IBM Plex Sans', 'IBM Plex Sans SC', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Element Plus 暗色主题映射到本课程调色板 */
+html.dark {
+  --el-color-primary: #FFB454;
+  --el-color-primary-light-3: #ffc878;
+  --el-color-primary-light-5: #ffe0b0;
+  --el-color-primary-dark-2: #e09a3a;
+  --el-bg-color: #161B22;
+  --el-bg-color-page: #0E1116;
+  --el-bg-color-overlay: #1C2230;
+  --el-text-color-primary: #E6E9EF;
+  --el-text-color-regular: #C4CBD8;
+  --el-text-color-secondary: #8B95A7;
+  --el-border-color: #2A2F3A;
+  --el-border-color-light: #2A2F3A;
+  --el-fill-color-blank: #0E1116;
+  --el-font-family: var(--font-body);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 签名元素：流式光标（阶段 03 起随流式实时推进，此处作为静态标识） */
+@keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.caret {
+  display: inline-block;
+  width: 0.55ch;
+  height: 1.05em;
+  background: var(--data);
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret { animation: none; }
+}
