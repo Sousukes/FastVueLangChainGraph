@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import AppHeader from './components/AppHeader.vue'
 import StageRail from './components/StageRail.vue'
-import PromptLab from './components/PromptLab.vue'
+import StreamChat from './components/StreamChat.vue'
 
 // 当前阶段配置（与 docs/DESIGN.md 三·阶段映射总表 对齐）
-const CURRENT_STAGE = 2
-const STAGE_TITLE = 'Prompt 工程'
+const CURRENT_STAGE = 3
+const STAGE_TITLE = '多轮对话与流式'
 
-// 阶段导航：阶段 02 仅作 UI 占位，真实路由在阶段 06 主线接入
+// 阶段导航：阶段 03 仅作 UI 占位，真实路由在阶段 06 主线接入
 function onNavigate(stage: number) {
-  console.info(`[stage-rail] 请求跳转阶段 ${stage}（阶段 02 暂未接入路由）`)
+  console.info(`[stage-rail] 请求跳转阶段 ${stage}（阶段 03 暂未接入路由）`)
 }
 </script>
 
@@ -19,7 +19,7 @@ function onNavigate(stage: number) {
     <div class="app-main">
       <AppHeader :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
       <main class="app-console">
-        <PromptLab :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
+        <StreamChat :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
       </main>
     </div>
   </div>
@@ -44,7 +44,7 @@ function onNavigate(stage: number) {
   flex: 1 1 auto;
   min-height: 0;
   padding: 22px;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 @media (max-width: 820px) {
@@ -56,6 +56,9 @@ function onNavigate(stage: number) {
   }
   .app-main {
     height: auto;
+  }
+  .app-console {
+    overflow-y: auto;
   }
 }
 </style>
