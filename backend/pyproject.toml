@@ -12,6 +12,8 @@ dependencies = [
     "sse-starlette>=2.1",
     "tzdata>=2024.1",
     "chromadb>=0.5",
+    # 阶段 07 起：本地嵌入。FastEmbed 走 ONNX，不依赖 torch，体积小、中文可用。
+    "fastembed>=0.4,<1",
 ]
 
 [tool.uv]
