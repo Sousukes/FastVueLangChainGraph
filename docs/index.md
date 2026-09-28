@@ -15,6 +15,7 @@ Deep Research、多模态到 Computer Use。
 - 🔗 [阶段 06 · MCP 协议开发](/stages/06-MCP协议开发) ← 主线大项目起点
 - 📚 [阶段 07 · RAG 基础（向量检索）](/stages/07-RAG基础)
 - 🎯 [阶段 08 · RAG 进阶（混合检索 / 重排）](/stages/08-RAG进阶)
+- 🕸️ [阶段 09 · GraphRAG 知识图谱](/stages/09-GraphRAG)
 
 ## 课程资料
 

@@ -21,6 +21,7 @@ RAG（Retrieval-Augmented Generation）的全部内容就是这条流水线，�
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -118,6 +119,9 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 
 
 _embedder: TextEmbedding | None = None
+# 同一个道理：两个并发的"首次检索"会各自构造一遍嵌入模型（几百 MB 内存 + 数秒加载），
+# 严重时直接 OOM。惰性单例一律加锁。
+_embedder_lock = threading.Lock()
 
 
 def get_embedder() -> TextEmbedding:
@@ -129,13 +133,16 @@ def get_embedder() -> TextEmbedding:
     """
     global _embedder
     if _embedder is None:
-        try:
-            _embedder = TextEmbedding(model_name=EMBED_MODEL)
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(
-                f"加载嵌入模型 {EMBED_MODEL} 失败：{e}。"
-                "首次使用需从 HuggingFace 下载权重；若网络不通，"
-                "可在 backend/.env 里加 HF_ENDPOINT=https://hf-mirror.com 后重启服务。"
+        with _embedder_lock:
+            if _embedder is not None:
+                return _embedder
+            try:
+                _embedder = TextEmbedding(model_name=EMBED_MODEL)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    f"加载嵌入模型 {EMBED_MODEL} 失败：{e}。"
+                    "首次使用需从 HuggingFace 下载权重；若网络不通，"
+                    "可在 backend/.env 里加 HF_ENDPOINT=https://hf-mirror.com 后重启服务。"
             ) from e
     return _embedder
 
@@ -163,6 +170,17 @@ def embedding_dim() -> int:
 
 
 _client: chromadb.ClientAPI | None = None
+_collection: chromadb.Collection | None = None
+# ⚠️ 惰性初始化的**双检锁**。这不是过度设计，是阶段 09 浏览器实测抓出来的真 bug：
+# 前端首屏会并发发出 4 个请求（stats / documents / overview / entities），
+# FastAPI 把它们丢进线程池，于是 4 个线程**同时**第一次调用 get_collection()。
+# 而 chromadb 的 PersistentClient 在构造时会去操作一个进程级共享注册表
+# （SharedSystemClient._identifier_to_system），这个注册表**不是线程安全的**：
+# 实测抛的是 `KeyError: '<...>\.chroma'` 和
+# `AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'`。
+# 结果就是"页面状态条全是 0"，而且不报错——最难查的那类 bug。
+# 教训：**凡是"第一次调用会构造全局单例"的惰性初始化，都要当成并发入口来处理。**
+_collection_lock = threading.Lock()
 
 
 def get_collection() -> chromadb.Collection:
@@ -171,22 +189,28 @@ def get_collection() -> chromadb.Collection:
     metadata 里的 hnsw:space=cosine 很关键：BGE 系列是按**余弦相似度**训练的，
     用默认的 L2 距离会得到不一样的排序。距离度量必须和模型匹配。
     """
-    global _client
-    if _client is None:
-        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-        # ⚠️ 只用**嵌入式**客户端（PersistentClient），不要换成 HttpClient。
-        #
-        # chromadb 1.5.x 目前带着 5 个未修复的 CVE（CVE-2026-45829/45830/45831/45833），
-        # 但它们**全部是服务端模式（HTTP API + 多租户 + 鉴权）的漏洞**：
-        # 比如"往 /api/v2/tenants/{t}/databases/{db}/collections 发一个恶意模型仓库
-        # 并把 trust_remote_code 设为 true 就能 RCE"。
-        # 本项目跑的是**本地嵌入式**库——没有 HTTP 服务、没有租户、没有鉴权，
-        # 这些攻击面一个都不存在。所以：**别为了"修漏洞"去升级或改用 HttpClient。**
-        _client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    return _client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
+    global _client, _collection
+    if _collection is None:
+        with _collection_lock:
+            if _collection is None:
+                CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+                # ⚠️ 只用**嵌入式**客户端（PersistentClient），不要换成 HttpClient。
+                #
+                # chromadb 1.5.x 目前带着 5 个未修复的 CVE（CVE-2026-45829/45830/45831/45833），
+                # 但它们**全部是服务端模式（HTTP API + 多租户 + 鉴权）的漏洞**：
+                # 比如"往 /api/v2/tenants/{t}/databases/{db}/collections 发一个恶意模型仓库
+                # 并把 trust_remote_code 设为 true 就能 RCE"。
+                # 本项目跑的是**本地嵌入式**库——没有 HTTP 服务、没有租户、没有鉴权，
+                # 这些攻击面一个都不存在。所以：**别为了"修漏洞"去升级或改用 HttpClient。**
+                if _client is None:
+                    _client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+                # 集合句柄也一并缓存：get_or_create_collection 同样会碰共享注册表，
+                # 并发首次调用有一样的风险。
+                _collection = _client.get_or_create_collection(
+                    name=COLLECTION_NAME,
+                    metadata={"hnsw:space": "cosine"},
+                )
+    return _collection
 
 
 # ---------- 统一语料视图（阶段 08） ----------
@@ -195,6 +219,9 @@ def get_collection() -> chromadb.Collection:
 # 这里把库里的块整体取出来，用**列表下标**当块的内部编号。
 _corpus_cache: list[dict] | None = None
 _bm25_cache: "bm25kit.BM25Index | None" = None
+# 语料缓存同样要加锁：并发首屏会让多个线程同时去 `collection.get()`
+# 并各自建一遍列表（白干一遍活），BM25 索引更是 CPU 密集，重复建代价明显。
+_cache_lock = threading.Lock()
 
 
 def invalidate_cache() -> None:
@@ -212,21 +239,23 @@ def corpus() -> list[dict]:
     """取出全部块（id / title / index / text）。"""
     global _corpus_cache
     if _corpus_cache is None:
-        collection = get_collection()
-        data = collection.get(include=["documents", "metadatas"])
-        _corpus_cache = [
-            {
-                "id": cid,
-                "title": str(meta.get("title", "")),
-                "index": int(meta.get("index", 0)),
-                "text": doc or "",
-            }
-            for cid, doc, meta in zip(
-                data.get("ids") or [],
-                data.get("documents") or [],
-                data.get("metadatas") or [],
-            )
-        ]
+        with _cache_lock:
+            if _corpus_cache is None:
+                collection = get_collection()
+                data = collection.get(include=["documents", "metadatas"])
+                _corpus_cache = [
+                    {
+                        "id": cid,
+                        "title": str(meta.get("title", "")),
+                        "index": int(meta.get("index", 0)),
+                        "text": doc or "",
+                    }
+                    for cid, doc, meta in zip(
+                        data.get("ids") or [],
+                        data.get("documents") or [],
+                        data.get("metadatas") or [],
+                    )
+                ]
     return _corpus_cache
 
 
@@ -234,9 +263,11 @@ def bm25_index() -> bm25kit.BM25Index:
     """按当前语料建 BM25 索引（带缓存，几百块瞬间建好）。"""
     global _bm25_cache
     if _bm25_cache is None:
-        index = bm25kit.BM25Index()
-        index.build([row["text"] for row in corpus()])
-        _bm25_cache = index
+        with _cache_lock:
+            if _bm25_cache is None:
+                index = bm25kit.BM25Index()
+                index.build([row["text"] for row in corpus()])
+                _bm25_cache = index
     return _bm25_cache
 
 
@@ -395,6 +426,7 @@ def bm25_ranking(query: str, top_k: int) -> list[tuple[int, float]]:
 
 
 _reranker: TextCrossEncoder | None = None
+_reranker_lock = threading.Lock()
 
 
 def rerank_ready() -> bool:
@@ -437,24 +469,27 @@ def get_reranker() -> TextCrossEncoder:
     """
     global _reranker
     if _reranker is None:
-        try:
-            registered = {m["model"] for m in TextCrossEncoder.list_supported_models()}
-            if RERANK_MODEL not in registered:
-                TextCrossEncoder.add_custom_model(
-                    model=RERANK_MODEL,
-                    sources=ModelSource(hf=RERANK_MODEL),
-                    model_file=RERANK_MODEL_FILE,
-                    description="bge-reranker-base int8 量化版（多语言，约 266MB）",
-                    license="MIT",
-                    size_in_gb=0.26,
-                )
-            _reranker = TextCrossEncoder(model_name=RERANK_MODEL)
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(
-                f"加载重排模型 {RERANK_MODEL} 失败：{e}。"
-                "首次使用需下载约 266MB 权重；若网络不通，"
-                "可在 backend/.env 里加 HF_ENDPOINT=https://hf-mirror.com 后重启服务。"
-            ) from e
+        with _reranker_lock:
+            if _reranker is not None:
+                return _reranker
+            try:
+                registered = {m["model"] for m in TextCrossEncoder.list_supported_models()}
+                if RERANK_MODEL not in registered:
+                    TextCrossEncoder.add_custom_model(
+                        model=RERANK_MODEL,
+                        sources=ModelSource(hf=RERANK_MODEL),
+                        model_file=RERANK_MODEL_FILE,
+                        description="bge-reranker-base int8 量化版（多语言，约 266MB）",
+                        license="MIT",
+                        size_in_gb=0.26,
+                    )
+                _reranker = TextCrossEncoder(model_name=RERANK_MODEL)
+            except Exception as e:  # noqa: BLE001
+                raise RuntimeError(
+                    f"加载重排模型 {RERANK_MODEL} 失败：{e}。"
+                    "首次使用需下载约 266MB 权重；若网络不通，"
+                    "可在 backend/.env 里加 HF_ENDPOINT=https://hf-mirror.com 后重启服务。"
+                ) from e
     return _reranker
 
 

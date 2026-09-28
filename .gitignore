@@ -15,6 +15,12 @@ vite.config.ts.timestamp-*
 # 阶段 07 起：ChromaDB 的本地落盘目录（删掉它就等于清空知识库）
 .chroma/
 
+# 阶段 09 起：知识图谱的 SQLite 落盘文件（删掉它只是丢了"抽取结果"，
+# 重新 build 一次就能回来——但 412 块要跑两个多小时，所以别手滑）
+.graph.db
+.graph.db-wal
+.graph.db-shm
+
 # env / secrets（注意：.env.example 需要提交，.env 不能提交）
 .env
 

@@ -317,3 +317,166 @@ class RagSeedResponse(BaseModel):
 
 class RagResetResponse(BaseModel):
     deleted: int
+
+
+# ---------- 阶段 09 · GraphRAG（知识图谱） ----------
+
+
+class GraphTypeCount(BaseModel):
+    type: str
+    count: int
+
+
+class GraphRelationCount(BaseModel):
+    relation: str
+    count: int
+
+
+class GraphStats(BaseModel):
+    """图谱状态。`coverage` 是**最该看的一个数**：抽了多少块 / 总共多少块。
+
+    它直接把本阶段的成本模型摆出来——覆盖率不是 100% 时，
+    "图里没有"和"语料里没有"是两件事，回答时必须分清楚。
+    """
+
+    entities: int
+    edges: int
+    extractedChunks: int
+    totalChunks: int
+    coverage: float
+    types: list[GraphTypeCount] = Field(default_factory=list)
+    relations: list[GraphRelationCount] = Field(default_factory=list)
+    # 封闭词表（图"可读"的前提）：类型用来配色，关系词用来做筛选
+    entityTypes: list[str] = Field(default_factory=list)
+    relationHints: list[str] = Field(default_factory=list)
+    lastBuiltAt: str | None = None
+
+
+class GraphBuildRequest(BaseModel):
+    """构建请求。`limit` 是**必须存在的**旋钮，不是偷懒——
+
+    每个块要跑一次 LLM，全量抽取是一笔真金白银的开销，
+    必须让人能控制它，而且要让人**亲眼看到**它有多大。
+    """
+
+    limit: int = Field(default=24, ge=1, le=200, description="本轮最多抽多少块（每块一次 LLM 调用）")
+    workers: int = Field(default=6, ge=1, le=12, description="并发数：抽取是 IO 密集，块间独立")
+    model: str | None = None
+    titles: list[str] | None = Field(
+        default=None, description="只抽这些文档（不传=全语料）。收窄范围是让 GraphRAG 可用的关键一招"
+    )
+
+
+class GraphBuildResponse(BaseModel):
+    processed: int
+    alreadyExtracted: int
+    remaining: int
+    entities: int
+    edges: int
+    chunks: int
+    seconds: float
+
+
+class GraphNode(BaseModel):
+    name: str
+    type: str = "概念"
+    mentions: int = 0
+    # hop = 距离种子几跳。0 是种子本身，1 是直接相连，2 是隔一个节点
+    hop: int = 0
+    isSeed: bool = False
+    degree: int = 0
+
+
+class GraphEdge(BaseModel):
+    """一条边。`sourceTitle` + `sourceIndex` 是**可溯源的锚点**——
+
+    没有出处的三元组就是"没有引用的断言"，模型会把它当事实写进答案。
+    """
+
+    id: int
+    head: str
+    relation: str
+    tail: str
+    sourceTitle: str
+    sourceIndex: int
+    hop: int = 0
+
+
+class GraphChunk(BaseModel):
+    """回溯到的源块。`edgeCount` = 这个块被多少条边引用（越高越可能是枢纽）。"""
+
+    id: str = ""
+    title: str
+    index: int
+    text: str
+    edgeCount: int = 0
+
+
+class GraphEntityItem(BaseModel):
+    name: str
+    type: str
+    mentions: int
+    degree: int
+
+
+class GraphEntitiesResponse(BaseModel):
+    total: int
+    items: list[GraphEntityItem] = Field(default_factory=list)
+
+
+class GraphDocumentItem(BaseModel):
+    title: str
+    chunks: int
+    extracted: int
+
+
+class GraphSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    hops: int = Field(default=2, ge=1, le=3, description="扩展跳数：1 精确但窄，2 跨块但噪声多")
+    top_k: int = Field(default=3, ge=1, le=10)
+
+
+class GraphSearchResponse(BaseModel):
+    """多跳检索结果。三段 timings 对应检索的三个环节：锚定 / 扩展 / 回溯。"""
+
+    query: str
+    seeds: list[str] = Field(default_factory=list)
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+    chunks: list[GraphChunk] = Field(default_factory=list)
+    hops: int = 2
+    timings: dict[str, float] = Field(default_factory=dict)
+
+
+class GraphAskRequest(BaseModel):
+    question: str = Field(min_length=1)
+    hops: int = Field(default=2, ge=1, le=3)
+    top_k: int = Field(default=3, ge=1, le=10)
+    model: str | None = None
+
+
+class GraphAskResponse(BaseModel):
+    """图谱问答。prompt 一并回传：**「图上的边是怎么变成 prompt 的」必须看得见**。"""
+
+    question: str
+    answer: str
+    prompt: str
+    model: str
+    seeds: list[str] = Field(default_factory=list)
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+    chunks: list[GraphChunk] = Field(default_factory=list)
+    hops: int = 2
+    timings: dict[str, float] = Field(default_factory=dict)
+
+
+class GraphOverview(BaseModel):
+    """全图（已截断）。300 个节点的图在屏幕上只是一团毛线，信息量为零。"""
+
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+
+
+class GraphResetResponse(BaseModel):
+    deletedEntities: int
+    deletedEdges: int

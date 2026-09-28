@@ -9,11 +9,18 @@
     GET  /api/health         健康检查（含当前模型）
     POST /api/chat           非流式：等模型说完，一次性返回
     POST /api/chat/stream    流式：SSE 逐块推送增量，前端边收边渲染
+
+后续阶段在这条主干上继续加路由（06 MCP / 07-08 RAG / 09 GraphRAG），
+但**上层的三个约定始终没变**：密钥只在服务端、请求体由 Pydantic 校验、
+长任务用 SSE 把中间过程推出去。
 """
 
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 from pathlib import Path
 from collections.abc import Iterator
 
@@ -27,6 +34,17 @@ from schemas import (
     ChatResponse,
     ExtractRequest,
     ExtractResponse,
+    GraphAskRequest,
+    GraphAskResponse,
+    GraphBuildRequest,
+    GraphBuildResponse,
+    GraphDocumentItem,
+    GraphEntitiesResponse,
+    GraphOverview,
+    GraphResetResponse,
+    GraphSearchRequest,
+    GraphSearchResponse,
+    GraphStats,
     MCPCatalog,
     MCPPromptRequest,
     MCPResourceContent,
@@ -52,6 +70,7 @@ from agent import run_tool_loop
 from tools import TOOLS
 from mcpkit.host import get_host
 import rag
+import graph
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -349,3 +368,169 @@ def rag_reset() -> RagResetResponse:
     before = rag.stats()["chunks"]
     rag.reset()
     return RagResetResponse(deleted=before)
+
+
+# ---------- 阶段 09 · GraphRAG（知识图谱） ----------
+#
+# 这一组接口和 RAG 那组的**结构差异**本身就是知识点：
+# 检索（search / ask）是**读**，几十毫秒就回来；
+# 构建（build）是**写**，每个块一次 LLM 调用，动辄几分钟。
+# 所以构建必须走 SSE 把进度推出来，而不是让一个 HTTP 请求干等。
+
+
+@app.get("/api/graph/stats", response_model=GraphStats)
+def graph_stats() -> GraphStats:
+    """图谱状态：实体数 / 边数 / 覆盖率 / 类型分布 / 关系词分布。
+
+    不依赖 LLM——和 MCP 目录、知识库状态一样，**图的读取和模型是解耦的**。
+    """
+    return GraphStats(**graph.stats())
+
+
+@app.get("/api/graph/entities", response_model=GraphEntitiesResponse)
+def graph_entities(limit: int = 200, q: str = "") -> GraphEntitiesResponse:
+    """实体清单（按提及次数排序）。`degree` 比 `mentions` 更能说明"枢纽"程度。"""
+    return GraphEntitiesResponse(**graph.list_entities(limit=limit, q=q))
+
+
+@app.get("/api/graph/documents", response_model=list[GraphDocumentItem])
+def graph_documents() -> list[GraphDocumentItem]:
+    """语料文档 + 每篇已抽多少块。前端用它渲染"构建范围"的勾选框。"""
+    return [GraphDocumentItem(**d) for d in graph.corpus_documents()]
+
+
+@app.get("/api/graph/overview", response_model=GraphOverview)
+def graph_overview(limit: int = 40) -> GraphOverview:
+    """全图快照（**已截断**）：按度数取最枢纽的若干节点及其之间的边。
+
+    为什么要截断：一张 300 节点的图在屏幕上只是一团毛线，信息量为零。
+    """
+    return GraphOverview(**graph.top_nodes(limit=limit))
+
+
+@app.post("/api/graph/build", response_model=GraphBuildResponse)
+def graph_build(req: GraphBuildRequest) -> GraphBuildResponse:
+    """**同步**构建：抽三元组 → 落 SQLite。
+
+    只适合小批量（`limit` 默认 24）。要看着进度跑长任务，用下面的 `/build/stream`。
+    """
+    client = get_client()
+    t0 = time.perf_counter()
+    try:
+        result = graph.build(
+            client,
+            limit=req.limit,
+            model=req.model,
+            workers=req.workers,
+            titles=req.titles,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"图谱构建失败：{e}") from e
+    return GraphBuildResponse(**result, seconds=round(time.perf_counter() - t0, 2))
+
+
+@app.post("/api/graph/build/stream")
+def graph_build_stream(req: GraphBuildRequest) -> StreamingResponse:
+    """**流式**构建：边抽边把进度推出去。
+
+    帧协议（四种）：
+        data: {"phase": "start",   "total": 12}
+        data: {"phase": "progress","done": 3, "total": 12, "chunk": "DESIGN#7",
+               "entities": 41, "edges": 38, "ms": 4100}
+        data: {"phase": "done",    "processed": 12, "entities": 211, "edges": 217,
+               "seconds": 48.9, "chunks": 12}
+        data: {"error": "..."}
+
+    为什么不用普通的同步请求：全量抽取要几分钟，中间**什么反馈都没有**。
+    进度条不只是体验问题——它是"抽取是入库时的一次性成本"这句话的唯一证据。
+
+    实现上有个必须绕开的坑：阶段 03 的 SSE 之所以能直接 `yield`，
+    是因为 `client.stream()` 本身就是个生成器。而 `graph.build()` 是**阻塞函数**，
+    在生成器里直接调它，就得等它整跑完才轮得到第一帧 `yield`——
+    进度会**在结束的瞬间一起涌出来**，等于没有进度。
+    所以这里把 build 丢进后台线程，用 `queue.Queue` 把进度搬回生成器。
+    """
+    client = get_client()
+    frames: queue.Queue = queue.Queue()
+
+    def event_gen() -> Iterator[str]:
+        outcome: dict = {}
+
+        def worker() -> None:
+            try:
+                outcome["result"] = graph.build(
+                    client,
+                    limit=req.limit,
+                    model=req.model,
+                    workers=req.workers,
+                    titles=req.titles,
+                    on_progress=lambda done, total, key: frames.put(
+                        {
+                            "phase": "progress",
+                            "done": done,
+                            "total": total,
+                            "chunk": key,
+                            **graph.counts(),
+                        }
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                outcome["error"] = str(e)
+            finally:
+                frames.put(None)  # 哨兵：告诉消费端"没有更多了"
+
+        t0 = time.perf_counter()
+        yield sse({"phase": "start", "total": req.limit})
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        while True:
+            item = frames.get()
+            if item is None:
+                break
+            yield sse(item)
+        thread.join()
+
+        if "error" in outcome:
+            yield sse({"error": f"图谱构建失败：{outcome['error']}"})
+            return
+        yield sse(
+            {"phase": "done", **outcome["result"], "seconds": round(time.perf_counter() - t0, 2)}
+        )
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+@app.post("/api/graph/search", response_model=GraphSearchResponse)
+def graph_search(req: GraphSearchRequest) -> GraphSearchResponse:
+    """**纯图谱检索**：不调用 LLM。
+
+    问题 → 锚定实体 → 沿边扩 N 跳 → 把边回溯到源块。
+    看这一步能立刻明白 GraphRAG 和向量检索的分工：
+    **向量找"像不像"，图找"连不连"。**
+    """
+    try:
+        found = graph.graph_search(req.query, hops=req.hops, top_k=req.top_k)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"图谱检索失败：{e}") from e
+    return GraphSearchResponse(query=req.query, hops=req.hops, **found)
+
+
+@app.post("/api/graph/ask", response_model=GraphAskResponse)
+def graph_ask(req: GraphAskRequest) -> GraphAskResponse:
+    """图谱问答：检索 → 拼 prompt → 生成。返回里带上 prompt 与整条关系链。"""
+    client = get_client()
+    try:
+        outcome = graph.ask(client, req.question, hops=req.hops, top_k=req.top_k, model=req.model)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"图谱问答失败：{e}") from e
+    return GraphAskResponse(question=req.question, **outcome)
+
+
+@app.post("/api/graph/reset", response_model=GraphResetResponse)
+def graph_reset() -> GraphResetResponse:
+    """清空图谱（教学用：换个抽取词表可以重来一遍）。"""
+    before = graph.stats()
+    graph.reset()
+    return GraphResetResponse(
+        deletedEntities=before["entities"], deletedEdges=before["edges"]
+    )
