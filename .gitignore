@@ -23,3 +23,4 @@ dist/
 
 # project memory (not course source)
 .workbuddy/
+.workbuddy-ai/

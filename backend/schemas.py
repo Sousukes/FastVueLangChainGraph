@@ -115,3 +115,76 @@ class ToolRunResponse(BaseModel):
     steps: int = 0
     model: str
     exhausted: bool = False  # True = 到了 max_steps 仍未给出最终答案
+
+
+# ---------- 阶段 06 · MCP ----------
+
+
+class MCPTool(BaseModel):
+    name: str
+    description: str = ""
+    inputSchema: dict = Field(default_factory=dict)
+
+
+class MCPResource(BaseModel):
+    uri: str
+    name: str = ""
+    description: str = ""
+    mimeType: str | None = None
+
+
+class MCPPrompt(BaseModel):
+    name: str
+    description: str = ""
+    arguments: list[dict] = Field(default_factory=list)
+
+
+class MCPServerInfo(BaseModel):
+    name: str
+    protocolVersion: str = ""
+    serverInfo: dict = Field(default_factory=dict)
+    capabilities: dict = Field(default_factory=dict)
+    tools: list[MCPTool] = Field(default_factory=list)
+    resources: list[MCPResource] = Field(default_factory=list)
+    prompts: list[MCPPrompt] = Field(default_factory=list)
+
+
+class MCPCatalog(BaseModel):
+    """已连接的 server 目录：这就是"模型能用的全部外部能力"。"""
+
+    servers: list[MCPServerInfo] = Field(default_factory=list)
+    defaultServer: str = ""
+
+
+class MCPLogEntry(BaseModel):
+    """一条 JSON-RPC 报文。dir: "→" 是我们发出、"←" 是 server 回应。"""
+
+    server: str
+    dir: str
+    payload: Any = None
+
+
+class MCPRunRequest(BaseModel):
+    question: str = Field(min_length=1)
+    model: str | None = None
+    max_steps: int = Field(default=4, ge=1, le=8)
+
+
+class MCPRunResponse(BaseModel):
+    answer: str | None = None
+    trace: list[TraceStep] = Field(default_factory=list)
+    steps: int = 0
+    model: str
+    exhausted: bool = False
+    protocol: list[MCPLogEntry] = Field(default_factory=list)
+
+
+class MCPResourceContent(BaseModel):
+    uri: str
+    mimeType: str | None = None
+    text: str = ""
+
+
+class MCPPromptRequest(BaseModel):
+    name: str = Field(min_length=1)
+    arguments: dict = Field(default_factory=dict)

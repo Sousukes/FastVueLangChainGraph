@@ -1,25 +1,36 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import AppHeader from './components/AppHeader.vue'
 import StageRail from './components/StageRail.vue'
-import ToolConsole from './components/ToolConsole.vue'
+import { stageById } from './stages'
+import { pathForStage } from './router'
 
-// 当前阶段配置（与 docs/DESIGN.md 三·阶段映射总表 对齐）
-const CURRENT_STAGE = 5
-const STAGE_TITLE = '函数调用与工具集成'
+/**
+ * 应用壳（阶段 06 起）：左进度轨 + 顶栏 + 路由出口。
+ *
+ * 壳本身不认识任何业务能力——它只回答两个问题：
+ *   现在在哪一阶段（路由 meta / :id）？点进度轨要去哪个路径？
+ * 具体能力（对话 / 抽取 / 工具 / MCP…）都在 pages/ 下，按路由懒加载。
+ */
+const route = useRoute()
+const router = useRouter()
 
-// 阶段导航：阶段 05 仅作 UI 占位，真实路由在阶段 06 主线接入
+const currentStage = computed(() => Number(route.meta.stage ?? route.params.id ?? 3))
+const stageTitle = computed(() => stageById(currentStage.value)?.label ?? '')
+
 function onNavigate(stage: number) {
-  console.info(`[stage-rail] 请求跳转阶段 ${stage}（阶段 05 暂未接入路由）`)
+  router.push(pathForStage(stage))
 }
 </script>
 
 <template>
   <div class="app-shell">
-    <StageRail :current="CURRENT_STAGE" class="app-rail" @navigate="onNavigate" />
+    <StageRail :current="currentStage" class="app-rail" @navigate="onNavigate" />
     <div class="app-main">
-      <AppHeader :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
+      <AppHeader :stage="currentStage" :title="stageTitle" />
       <main class="app-console">
-        <ToolConsole :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
+        <RouterView />
       </main>
     </div>
   </div>

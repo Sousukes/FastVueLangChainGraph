@@ -10,6 +10,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pydantic>=2.7",
     "sse-starlette>=2.1",
+    "tzdata>=2024.1",
     "chromadb>=0.5",
 ]
 

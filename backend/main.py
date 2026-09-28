@@ -26,6 +26,11 @@ from schemas import (
     ChatResponse,
     ExtractRequest,
     ExtractResponse,
+    MCPCatalog,
+    MCPPromptRequest,
+    MCPResourceContent,
+    MCPRunRequest,
+    MCPRunResponse,
     ToolInfo,
     ToolRunRequest,
     ToolRunResponse,
@@ -34,8 +39,9 @@ from schemas import (
 from extract import extract_one
 from agent import run_tool_loop
 from tools import TOOLS
+from mcpkit.host import get_host
 
-app = FastAPI(title="AI 研究助手 · 阶段 03（多轮对话与流式）")
+app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
 # 阶段 03 前端由 Vite 代理转发（/api -> :8000），生产环境请改为具体域名
 app.add_middleware(
@@ -153,3 +159,53 @@ def tools_run(req: ToolRunRequest) -> ToolRunResponse:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"工具调用失败：{e}") from e
     return ToolRunResponse(**outcome)
+
+
+# ---------- 阶段 06 · MCP（Model Context Protocol） ----------
+
+
+@app.get("/api/mcp/servers", response_model=MCPCatalog)
+def mcp_servers() -> MCPCatalog:
+    """已连接的 MCP Server 目录：协议版本、能力清单、工具 / 资源 / 提示模板。
+
+    不依赖 LLM，所以没有 Key 也能看——这正是 MCP 的意义：能力与模型解耦。
+    """
+    try:
+        return MCPCatalog(**get_host().describe())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"MCP server 连接失败：{e}") from e
+
+
+@app.post("/api/mcp/run", response_model=MCPRunResponse)
+def mcp_run(req: MCPRunRequest) -> MCPRunResponse:
+    """用 MCP Server 提供的工具跑一轮对话，并把 JSON-RPC 报文一并回传。"""
+    client = get_client()
+    try:
+        outcome = get_host().run(client, req.question, model=req.model, max_steps=req.max_steps)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"MCP 调用失败：{e}") from e
+    return MCPRunResponse(**outcome)
+
+
+@app.get("/api/mcp/resource", response_model=MCPResourceContent)
+def mcp_resource(uri: str) -> MCPResourceContent:
+    """读一个 Resource（resources/read）。资源是"可读取的数据"，不是函数。"""
+    try:
+        result = get_host().ensure_connected().read_resource(uri)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"读取资源失败：{e}") from e
+    contents = (result.get("contents") or [{}])[0]
+    return MCPResourceContent(
+        uri=contents.get("uri", uri),
+        mimeType=contents.get("mimeType"),
+        text=contents.get("text", ""),
+    )
+
+
+@app.post("/api/mcp/prompt")
+def mcp_prompt(req: MCPPromptRequest) -> dict:
+    """取一个 Prompt 模板（prompts/get）——注意它返回的是 messages，不是文本。"""
+    try:
+        return get_host().ensure_connected().get_prompt(req.name, req.arguments)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"取提示模板失败：{e}") from e

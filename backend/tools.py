@@ -20,7 +20,7 @@ import operator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Literal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -104,6 +104,9 @@ _NOTES = [
     ("Prompt", "角色设定 / 少样本 / 结构化约束是三种最常用的 Prompt 技法。"),
     ("结构化输出", "response_format=json_object 只保证 JSON 合法，字段与类型合规要靠 Pydantic 校验。"),
     ("多轮对话", "HTTP 无状态：多轮 = 每轮把整段 messages 历史重新发一遍。"),
+    ("MCP", "Model Context Protocol：用 JSON-RPC 2.0 把外部能力标准化接入 LLM 应用。"
+            "三大原语 Tools（可调用）/ Resources（可读取）/ Prompts（可复用）；"
+            "传输可用 stdio 或 Streamable HTTP；Host 是应用本体、Client 负责连接、Server 提供能力。"),
 ]
 
 
@@ -116,6 +119,11 @@ def tool_search_notes(query: str, limit: int = 3) -> dict:
         "total": len(hits),
         "items": [{"title": t, "snippet": s} for t, s in hits[:limit]],
     }
+
+
+def all_notes() -> list[tuple[str, str]]:
+    """只读访问器：阶段 06 的 MCP server 把笔记整包作为 Resource 暴露出去。"""
+    return list(_NOTES)
 
 
 _WEATHER = {
@@ -137,7 +145,17 @@ def tool_get_weather(city: str, unit: str = "celsius") -> dict:
 
 
 def tool_get_current_time(timezone: str = "Asia/Shanghai") -> dict:
-    now = datetime.now(ZoneInfo(timezone))
+    try:
+        tz = ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as e:
+        # 真机踩坑：Windows 没有系统时区库，zoneinfo 会找不到任何时区
+        # （连 "UTC" 都找不到，报错却长得像"时区名写错了"，极易误导）。
+        # 依赖 tzdata 包（见 pyproject.toml），这里把原因说清楚。
+        raise ValueError(
+            f"取不到时区 {timezone}：运行环境缺少时区数据库。"
+            "Windows 上需安装 tzdata（uv add tzdata）后重启服务。"
+        ) from e
+    now = datetime.now(tz)
     return {
         "timezone": timezone,
         "iso": now.isoformat(timespec="seconds"),

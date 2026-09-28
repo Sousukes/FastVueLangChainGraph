@@ -1,6 +1,9 @@
 <script setup lang="ts">
 // 阶段时间线：竖向 00→18 进度轨（桌面）；移动端收为顶部横向步骤条。
 // 状态语义：done=已学(实心 Signal 点) / current=当前(▶ Data 箭头) / todo=未学(空心圈)。
+// 阶段清单从共享模块来（router 也用它），避免两处各写一份而逐渐漂移。
+import { STAGES } from '../stages'
+
 const props = defineProps<{
   current: number
 }>()
@@ -9,29 +12,7 @@ const emit = defineEmits<{
   (e: 'navigate', stage: number): void
 }>()
 
-// 与 docs/DESIGN.md 三·阶段映射总表 保持一致
-const STAGES: { id: number; label: string }[] = [
-  { id: 0, label: '环境准备' },
-  { id: 1, label: '大模型 API 编程' },
-  { id: 2, label: 'Prompt 工程' },
-  { id: 3, label: '多轮对话与流式' },
-  { id: 4, label: '结构化输出与信息抽取' },
-  { id: 5, label: '函数调用与工具集成' },
-  { id: 6, label: 'MCP 协议开发' },
-  { id: 7, label: 'RAG 基础' },
-  { id: 8, label: 'RAG 进阶' },
-  { id: 9, label: 'GraphRAG 知识图谱' },
-  { id: 10, label: '单智能体' },
-  { id: 11, label: '多智能体' },
-  { id: 12, label: 'Agent Harness' },
-  { id: 13, label: 'Agentic RAG' },
-  { id: 14, label: 'AI 搜索应用' },
-  { id: 15, label: 'Deep Research' },
-  { id: 16, label: '多模态·图像' },
-  { id: 17, label: '多模态·语音' },
-  { id: 18, label: 'Computer Use' },
-]
-
+// 与 docs/DESIGN.md 三·阶段映射总表 保持一致（阶段 → 路由 的映射见 src/stages.ts）
 function statusOf(id: number): 'done' | 'current' | 'todo' {
   if (id < props.current) return 'done'
   if (id === props.current) return 'current'

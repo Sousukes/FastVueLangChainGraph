@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, Callable
 
 from llm import LLMClient, message_to_dict
 from tools import execute_tool, tools_schema
@@ -38,19 +38,31 @@ def run_tool_loop(
     model: str | None = None,
     max_steps: int = 4,
     temperature: float = 0.2,
+    tools: list[dict] | None = None,
+    executor: Callable[[str, str], tuple[Any, str | None]] | None = None,
+    system: str | None = None,
 ) -> dict[str, Any]:
     """跑完一整轮"提问 → 工具调用 → 回答"，并把全过程记录成 trace。
 
     trace 是本阶段的主角：前端要能把"模型为什么这么答"摊开给用户看。
+
+    三个可注入点（阶段 06 用它们把工具来源换成 MCP）：
+      - `tools`：工具说明书，默认用本地注册表；传 MCP 转换来的 schema 即可
+      - `executor`：工具执行器 `(name, raw_arguments) -> (result, error)`，
+        默认走本地 `execute_tool`；传 MCP 版即可让模型去调远程 server
+      - `system`：系统提示，默认是本文件的 SYSTEM_PROMPT
     """
+    tools = tools if tools is not None else tools_schema()
+    executor = executor or execute_tool
+
     messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system or SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
     trace: list[dict] = []
 
     for step in range(1, max_steps + 1):
-        msg = client.chat_message(messages, model=model, temperature=temperature, tools=tools_schema())
+        msg = client.chat_message(messages, model=model, temperature=temperature, tools=tools)
         calls = getattr(msg, "tool_calls", None)
 
         # 没有 tool_calls = 模型认为可以直接回答，循环结束
@@ -69,7 +81,7 @@ def run_tool_loop(
         # 2) 逐个执行工具，并把结果作为 role="tool" 追加
         for call in calls:
             t0 = time.perf_counter()
-            result, error = execute_tool(call.function.name, call.function.arguments)
+            result, error = executor(call.function.name, call.function.arguments)
             ms = round((time.perf_counter() - t0) * 1000, 1)
 
             trace.append(
@@ -84,11 +96,12 @@ def run_tool_loop(
             )
 
             # 工具结果必须以字符串形式回传；错误也一样回传（让模型有机会自纠）
-            content = (
-                json.dumps(result, ensure_ascii=False)
-                if error is None
-                else json.dumps({"error": error}, ensure_ascii=False)
-            )
+            if error is not None:
+                content = json.dumps({"error": error}, ensure_ascii=False)
+            elif isinstance(result, str):
+                content = result  # 已经是文本（如 MCP server 返回的 content）就直接用
+            else:
+                content = json.dumps(result, ensure_ascii=False)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
 
     # 超出步数上限：把最后一轮的"半成品"交出去，让前端提示"未收敛"
