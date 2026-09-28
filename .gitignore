@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+*.local
+
+# env / secrets（注意：.env.example 需要提交，.env 不能提交）
+.env
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# misc
+*.log
+
+# project memory (not course source)
+.workbuddy/
