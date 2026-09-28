@@ -61,7 +61,7 @@ async function onSubmit() {
       <!-- 左：模板编辑 -->
       <div class="col">
         <label class="field">
-          <span class="field-label">Prompt 模板（用 {{ "{{变量}}" }} 占位）</span>
+          <span class="field-label">Prompt 模板（用 &#123;&#123;变量&#125;&#125; 占位）</span>
           <el-input
             v-model="template"
             type="textarea"

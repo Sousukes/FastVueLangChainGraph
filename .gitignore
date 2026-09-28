@@ -19,6 +19,7 @@ dist/
 
 # misc
 *.log
+*.tsbuildinfo
 
 # project memory (not course source)
 .workbuddy/
