@@ -49,22 +49,34 @@ class LLMClient:
             )
         self._client = OpenAI(api_key=key, base_url=self.base_url)
 
-    def _payload(self, messages: list[dict], model: str | None, temperature: float) -> dict:
-        return {
+    def _payload(
+        self,
+        messages: list[dict],
+        model: str | None,
+        temperature: float,
+        response_format: dict | None,
+    ) -> dict:
+        payload: dict = {
             "model": model or self.model,
             "messages": messages,
             "temperature": temperature,
         }
+        # 阶段 04 用：DeepSeek/DeepSeek-V3 支持 {"type": "json_object"}；
+        # 其它厂商不识别时 SDK 会抛 400，由 extract 流程做降级重试。
+        if response_format:
+            payload["response_format"] = response_format
+        return payload
 
     def chat(
         self,
         messages: list[dict],
         model: str | None = None,
         temperature: float = 0.7,
+        response_format: dict | None = None,
     ) -> str:
-        """一次性拿到完整回复（非流式）。"""
+        """一次性拿到完整回复（非流式）。可选 response_format：见 _payload 注释。"""
         resp = self._client.chat.completions.create(
-            **self._payload(messages, model, temperature),
+            **self._payload(messages, model, temperature, response_format),
             stream=False,
         )
         return resp.choices[0].message.content or ""

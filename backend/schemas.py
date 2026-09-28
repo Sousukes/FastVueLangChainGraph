@@ -1,6 +1,7 @@
-"""请求 / 响应契约（阶段 03）。
+"""请求 / 响应契约。
 
-前后端唯一的数据契约：前端把"整段对话历史"交给后端，后端返回"这一轮的回复"。
+阶段 03：多轮对话（messages 全量回放）
+阶段 04：结构化抽取（动态字段定义 + Pydantic 校验结果回传）
 """
 
 from __future__ import annotations
@@ -37,3 +38,43 @@ class ChatResponse(BaseModel):
 def to_dicts(messages: list[Message]) -> list[dict]:
     """Pydantic 模型 → OpenAI SDK 需要的普通 dict 列表。"""
     return [{"role": m.role, "content": m.content} for m in messages]
+
+
+# ---------- 阶段 04 · 结构化抽取 ----------
+
+FieldType = Literal["string", "int", "number", "bool", "array"]
+
+
+class FieldSpec(BaseModel):
+    """一条字段定义。
+
+    - `name` 必须是合法 Python 标识符：pydantic.create_model 会用它做属性名，
+      校验失败就能提前把"非法字段名"挡在调用上游之外。
+    - `enum` 仅对 `string` 生效；其余类型若提供 enum 会被忽略。
+    """
+
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    type: FieldType
+    description: str = ""
+    required: bool = True
+    enum: list[str] | None = None
+
+
+class ExtractRequest(BaseModel):
+    """前端每次请求：把"待抽取文本 + 字段定义"一起交给后端。"""
+
+    text: str = Field(min_length=1)
+    fields: list[FieldSpec] = Field(min_length=1)
+    model: str | None = None
+
+
+class ExtractResponse(BaseModel):
+    """结构化抽取的完整结果：成功给 data，失败也把 raw 留回来给用户对照。"""
+
+    data: dict | None = None
+    raw: str = ""
+    attempts: int = 1
+    valid: bool = False
+    model: str
+    error: str | None = None
+    warning: str | None = None  # 例如「JSON 模式不支持，已降级」

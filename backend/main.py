@@ -21,7 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from llm import LLMClient, LLMNotConfiguredError
-from schemas import ChatRequest, ChatResponse, to_dicts
+from schemas import ChatRequest, ChatResponse, ExtractRequest, ExtractResponse, to_dicts
+from extract import extract_one
 
 app = FastAPI(title="AI 研究助手 · 阶段 03（多轮对话与流式）")
 
@@ -104,3 +105,17 @@ def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield sse({"error": f"模型调用失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+@app.post("/api/extract", response_model=ExtractResponse)
+def extract(req: ExtractRequest) -> ExtractResponse:
+    """结构化抽取：JSON 模式 + Pydantic 校验 + 自纠重试。
+
+    失败也不会 5xx：返回 `valid=False` + `error` 让前端照原样展示原始输出与失败原因。
+    只有真正的"调用前出错"（如字段定义非法）才走 4xx。
+    """
+    client = get_client()
+    try:
+        return extract_one(client, req)
+    except Exception as e:  # 上游模型调用 / schema 编译等真异常
+        raise HTTPException(status_code=502, detail=f"抽取失败：{e}") from e
