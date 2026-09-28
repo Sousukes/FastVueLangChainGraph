@@ -14,6 +14,8 @@ dependencies = [
     "chromadb>=0.5",
     # 阶段 07 起：本地嵌入。FastEmbed 走 ONNX，不依赖 torch，体积小、中文可用。
     "fastembed>=0.4,<1",
+    # 阶段 08 起：中文分词，给 BM25 关键词检索用（中文没有空格，必须先分词）。
+    "jieba>=0.42",
 ]
 
 [tool.uv]

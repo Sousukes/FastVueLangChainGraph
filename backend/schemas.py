@@ -203,6 +203,9 @@ class RagStatus(BaseModel):
     chunkSize: int
     chunkOverlap: int
     persistDir: str
+    # 阶段 08 起
+    rerankModel: str = ""
+    rerankReady: bool = False
 
 
 class RagDocumentIn(BaseModel):
@@ -226,28 +229,70 @@ class RagIngestResponse(BaseModel):
 
 
 class RagHit(BaseModel):
-    """一条检索命中。score 是余弦相似度（越大越像），已从 distance 换算过来。"""
+    """一条检索命中。
+
+    score 沿用阶段 07 的语义（**余弦相似度**，越大越像），这样两个阶段能直接对照。
+    BM25 单独召回进来的块没有余弦分，score 记 0——"它不是靠语义进来的"。
+    阶段 08 补充的三个字段用来解释**这一条为什么排在这里**。
+    """
 
     title: str
     index: int
     score: float
     text: str
+    vector_score: float | None = None
+    bm25_score: float | None = None
+    rerank_score: float | None = None
+
+
+class RagRankRow(BaseModel):
+    """排名对照表的一行：同一个块在各阶段的名次。
+
+    这是阶段 08 前端的主角——把「向量第 25 名 → 融合第 3 名 → 重排第 1 名」
+    这种变化直接摆出来，比任何文字解释都清楚。
+    """
+
+    title: str
+    index: int
+    text: str
+    vector_rank: int | None = None
+    bm25_rank: int | None = None
+    fused_rank: int | None = None
+    rerank_rank: int | None = None
+    vector_score: float | None = None
+    bm25_score: float | None = None
+    fused_score: float | None = None
+    rerank_score: float | None = None
+    in_final: bool = False
 
 
 class RagSearchRequest(BaseModel):
     query: str = Field(min_length=1)
     top_k: int = Field(default=3, ge=1, le=10)
+    # 阶段 08 起：默认仍是纯向量，保证阶段 07 的行为不变。
+    mode: Literal["vector", "bm25", "hybrid"] = "vector"
+    rerank: bool = False
+    candidates: int = Field(default=10, ge=1, le=50)
 
 
 class RagSearchResponse(BaseModel):
     query: str
     hits: list[RagHit] = Field(default_factory=list)
+    mode: str = "vector"
+    rerank: bool = False
+    candidates: int = 0
+    rows: list[RagRankRow] = Field(default_factory=list)
+    timings: dict[str, float] = Field(default_factory=dict)
 
 
 class RagAskRequest(BaseModel):
     question: str = Field(min_length=1)
     top_k: int = Field(default=3, ge=1, le=10)
     model: str | None = None
+    # 阶段 08 起
+    mode: Literal["vector", "bm25", "hybrid"] = "vector"
+    rerank: bool = False
+    candidates: int = Field(default=10, ge=1, le=50)
 
 
 class RagAskResponse(BaseModel):
@@ -260,6 +305,10 @@ class RagAskResponse(BaseModel):
     hits: list[RagHit] = Field(default_factory=list)
     prompt: str
     model: str
+    mode: str = "vector"
+    rerank: bool = False
+    rows: list[RagRankRow] = Field(default_factory=list)
+    timings: dict[str, float] = Field(default_factory=dict)
 
 
 class RagSeedResponse(BaseModel):

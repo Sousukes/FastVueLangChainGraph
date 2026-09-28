@@ -55,10 +55,17 @@ import rag
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
-# 阶段 03 前端由 Vite 代理转发（/api -> :8000），生产环境请改为具体域名
+# 阶段 03 前端由 Vite 代理转发（/api -> :8000），生产环境请改为具体域名。
+#
+# ⚠️ 安全：这里**不能**写 allow_origins=["*"]。
+# 本项目有 /api/rag/reset 这类破坏性接口，而浏览器不会拦截跨站请求的**发送**——
+# 一旦放开 *，用户访问的任意网页都能悄悄 POST 到 127.0.0.1:8000 把知识库清空。
+# 所以只放行本机开发端口（Vite 的 5173/5174/4173 等都覆盖到）。
+# 用 regex 而不是写死列表，是因为 Vite 端口被占用时会自动顺延。
+_LOCAL_ORIGIN = r"^http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=_LOCAL_ORIGIN,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -291,12 +298,30 @@ def rag_search(req: RagSearchRequest) -> RagSearchResponse:
     """**纯检索**：不调用 LLM，只回答"库里的哪些块跟这个问题最像"。
 
     RAG 调优的第一条纪律就是先看这一步——检索错了，生成再强也救不回来。
+
+    阶段 08 起多了三个旋钮：`mode`（vector / bm25 / hybrid）、`rerank`、
+    `candidates`。默认值仍是纯向量，所以阶段 07 的行为不变。
+    返回值里的 `rows` 是**排名对照表**：同一个块在各阶段的名次。
     """
     try:
-        hits = rag.search(req.query, top_k=req.top_k)
+        found = rag.hybrid_search(
+            req.query,
+            top_k=req.top_k,
+            mode=req.mode,
+            rerank=req.rerank,
+            candidates=req.candidates,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"检索失败：{e}") from e
-    return RagSearchResponse(query=req.query, hits=hits)
+    return RagSearchResponse(
+        query=req.query,
+        hits=found["hits"],
+        mode=req.mode,
+        rerank=req.rerank,
+        candidates=req.candidates,
+        rows=found["rows"],
+        timings=found["timings"],
+    )
 
 
 @app.post("/api/rag/ask", response_model=RagAskResponse)
@@ -304,7 +329,15 @@ def rag_ask(req: RagAskRequest) -> RagAskResponse:
     """完整 RAG：检索 → 拼 prompt → 生成。返回里带上 prompt，让"增强"这一步可见。"""
     client = get_client()
     try:
-        outcome = rag.ask(client, req.question, top_k=req.top_k, model=req.model)
+        outcome = rag.ask(
+            client,
+            req.question,
+            top_k=req.top_k,
+            model=req.model,
+            mode=req.mode,
+            rerank=req.rerank,
+            candidates=req.candidates,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"RAG 问答失败：{e}") from e
     return RagAskResponse(**outcome)

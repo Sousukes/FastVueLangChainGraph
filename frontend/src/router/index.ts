@@ -42,6 +42,12 @@ const routes: RouteRecordRaw[] = [
     meta: { stage: 7 },
   },
   {
+    path: '/hybrid',
+    name: 'hybrid',
+    component: () => import('../pages/HybridPage.vue'),
+    meta: { stage: 8 },
+  },
+  {
     path: '/stage/:id(\\d+)',
     name: 'stage-placeholder',
     component: () => import('../pages/StagePlaceholder.vue'),

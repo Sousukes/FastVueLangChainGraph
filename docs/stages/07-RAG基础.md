@@ -353,6 +353,9 @@ def ask(client, question, top_k=3, model=None) -> dict:
     return {"answer": answer, "hits": hits, "prompt": prompt, "model": ...}
 ```
 
+> 阶段 08 会给这个函数**追加**三个带默认值的参数（`mode` / `rerank` / `candidates`），
+> 把「检索」这一步换成可配置的管道。默认值仍是纯向量，所以这里写的调用方式**不会失效**。
+
 **返回值里带上 `hits` 和 `prompt` 是有意为之。** 阶段 06 我们把 JSON-RPC 报文摊给了用户看，这一阶段我们把"模型到底看到了什么"摊开——**可解释性是同一个思路的延续**。
 
 ### 4.5 后端 · 路由：`main.py`

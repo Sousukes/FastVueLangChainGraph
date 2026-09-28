@@ -23,7 +23,7 @@ export const STAGES: StageMeta[] = [
   { id: 5, label: '函数调用与工具集成', path: '/tools' },
   { id: 6, label: 'MCP 协议开发', path: '/mcp' },
   { id: 7, label: 'RAG 基础', path: '/rag' },
-  { id: 8, label: 'RAG 进阶', path: null },
+  { id: 8, label: 'RAG 进阶', path: '/hybrid' },
   { id: 9, label: 'GraphRAG 知识图谱', path: null },
   { id: 10, label: '单智能体', path: null },
   { id: 11, label: '多智能体', path: null },

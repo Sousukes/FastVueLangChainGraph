@@ -35,7 +35,10 @@ load_dotenv()
 
 import chromadb  # noqa: E402
 from fastembed import TextEmbedding  # noqa: E402
+from fastembed.common.model_description import ModelSource  # noqa: E402
+from fastembed.rerank.cross_encoder import TextCrossEncoder  # noqa: E402
 
+import bm25 as bm25kit  # noqa: E402
 from llm import LLMClient  # noqa: E402
 
 # ---------- 配置 ----------
@@ -46,6 +49,10 @@ CHUNK_OVERLAP = 80
 
 EMBED_MODEL = "BAAI/bge-small-zh-v1.5"
 COLLECTION_NAME = "course_knowledge"
+
+# 阶段 08 起：重排模型。默认用 int8 量化版（266MB），见 get_reranker() 里的说明。
+RERANK_MODEL = "Xenova/bge-reranker-base"
+RERANK_MODEL_FILE = "onnx/model_quantized.onnx"
 
 # 向量库落在 backend/.chroma（已 gitignore）；想重来一遍就删掉它
 CHROMA_DIR = Path(__file__).resolve().parent / ".chroma"
@@ -167,11 +174,70 @@ def get_collection() -> chromadb.Collection:
     global _client
     if _client is None:
         CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        # ⚠️ 只用**嵌入式**客户端（PersistentClient），不要换成 HttpClient。
+        #
+        # chromadb 1.5.x 目前带着 5 个未修复的 CVE（CVE-2026-45829/45830/45831/45833），
+        # 但它们**全部是服务端模式（HTTP API + 多租户 + 鉴权）的漏洞**：
+        # 比如"往 /api/v2/tenants/{t}/databases/{db}/collections 发一个恶意模型仓库
+        # 并把 trust_remote_code 设为 true 就能 RCE"。
+        # 本项目跑的是**本地嵌入式**库——没有 HTTP 服务、没有租户、没有鉴权，
+        # 这些攻击面一个都不存在。所以：**别为了"修漏洞"去升级或改用 HttpClient。**
         _client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     return _client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
+
+
+# ---------- 统一语料视图（阶段 08） ----------
+
+# 向量检索和 BM25 是两套完全不同的打分机制，要融合就必须先让两边指向同一批"块"。
+# 这里把库里的块整体取出来，用**列表下标**当块的内部编号。
+_corpus_cache: list[dict] | None = None
+_bm25_cache: "bm25kit.BM25Index | None" = None
+
+
+def invalidate_cache() -> None:
+    """语料变了（入库 / 删除 / 清空）就调它，下次检索时重建。
+
+    这是缓存最容易出错的地方：**忘了失效，检索结果就会"慢半拍"**——
+    明明刚导入的文档，却怎么搜都搜不到。所以增删改三处都要记得调。
+    """
+    global _corpus_cache, _bm25_cache
+    _corpus_cache = None
+    _bm25_cache = None
+
+
+def corpus() -> list[dict]:
+    """取出全部块（id / title / index / text）。"""
+    global _corpus_cache
+    if _corpus_cache is None:
+        collection = get_collection()
+        data = collection.get(include=["documents", "metadatas"])
+        _corpus_cache = [
+            {
+                "id": cid,
+                "title": str(meta.get("title", "")),
+                "index": int(meta.get("index", 0)),
+                "text": doc or "",
+            }
+            for cid, doc, meta in zip(
+                data.get("ids") or [],
+                data.get("documents") or [],
+                data.get("metadatas") or [],
+            )
+        ]
+    return _corpus_cache
+
+
+def bm25_index() -> bm25kit.BM25Index:
+    """按当前语料建 BM25 索引（带缓存，几百块瞬间建好）。"""
+    global _bm25_cache
+    if _bm25_cache is None:
+        index = bm25kit.BM25Index()
+        index.build([row["text"] for row in corpus()])
+        _bm25_cache = index
+    return _bm25_cache
 
 
 # ---------- 入库 / 检索 ----------
@@ -199,6 +265,7 @@ def add_document(title: str, text: str) -> dict:
         metadatas=metadatas,
         embeddings=embed_documents(chunks),
     )
+    invalidate_cache()  # 语料变了，BM25 索引必须重建
     return {
         "title": title,
         "chunks": len(chunks),
@@ -213,6 +280,7 @@ def delete_document(title: str) -> int:
     ids = existing.get("ids") or []
     if ids:
         collection.delete(ids=ids)
+        invalidate_cache()
     return len(ids)
 
 
@@ -255,6 +323,10 @@ def stats() -> dict:
         "chunkSize": CHUNK_SIZE,
         "chunkOverlap": CHUNK_OVERLAP,
         "persistDir": str(CHROMA_DIR),
+        # 阶段 08 起：重排模型。rerankReady 只查缓存，不触发下载——
+        # "要不要下 266MB"这个决定必须由用户来做，不能由一次状态查询偷偷替他做。
+        "rerankModel": RERANK_MODEL,
+        "rerankReady": rerank_ready(),
     }
 
 
@@ -265,6 +337,7 @@ def reset() -> None:
     ids = existing.get("ids") or []
     if ids:
         collection.delete(ids=ids)
+    invalidate_cache()
 
 
 def search(query: str, top_k: int = 3) -> list[dict]:
@@ -294,6 +367,207 @@ def search(query: str, top_k: int = 3) -> list[dict]:
     return hits
 
 
+# ---------- 阶段 08 · 混合检索与重排 ----------
+
+
+def vector_ranking(query: str, top_k: int) -> list[tuple[int, float]]:
+    """向量召回：返回 [(块下标, 余弦相似度)]。"""
+    collection = get_collection()
+    rows = corpus()
+    if not rows or collection.count() == 0:
+        return []
+    position = {row["id"]: i for i, row in enumerate(rows)}
+    result = collection.query(
+        query_embeddings=[embed_query(query)],
+        n_results=min(top_k, collection.count()),
+        include=["distances"],
+    )
+    out: list[tuple[int, float]] = []
+    for cid, dist in zip(result["ids"][0], result["distances"][0]):
+        if cid in position:
+            out.append((position[cid], round(1.0 - float(dist), 4)))
+    return out
+
+
+def bm25_ranking(query: str, top_k: int) -> list[tuple[int, float]]:
+    """关键词召回：返回 [(块下标, BM25 分数)]。"""
+    return [(i, round(s, 4)) for i, s in bm25_index().search(query, top_k=top_k)]
+
+
+_reranker: TextCrossEncoder | None = None
+
+
+def rerank_ready() -> bool:
+    """重排模型是否已在本地（只查缓存，不触发下载）。
+
+    用一个 boolean 把这个信息暴露出去，是因为**下载 266MB 不该是意外**——
+    用户点"重排"之前就应该知道会发生什么。
+    """
+    try:
+        from fastembed.common.utils import define_cache_dir
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(
+            RERANK_MODEL, RERANK_MODEL_FILE, cache_dir=str(define_cache_dir())
+        )
+        return isinstance(cached, str) and Path(cached).exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def get_reranker() -> TextCrossEncoder:
+    """懒加载 Cross-encoder 重排模型。
+
+    **为什么不是内置的 `BAAI/bge-reranker-base`？**
+    内置源指向 fp32 的 `onnx/model.onnx`，**1.06 GB**——对学员太重了。
+    Xenova 提供了同一个模型的 **int8 量化版，只要 266 MB**（小 4 倍），
+    排序效果几乎无损。FastEmbed 支持注册自定义模型，把 `model_file`
+    指到量化版即可。
+
+    顺便记住这个思路：**"模型太大"的第一反应应该是量化，而不是换模型**。
+
+    **Cross-encoder 和嵌入模型（bi-encoder）的区别是本阶段的核心概念：**
+      - bi-encoder：问题和文档**各自**编码成向量，最后算距离。
+        快（文档向量可以预先算好），但**问题和文档从没见过面**。
+      - cross-encoder：把 **(问题, 文档) 拼成一条序列**一起送进模型，
+        让注意力在两者之间自由流动。慢（每对都要跑一次前向），但准得多。
+
+    所以标准做法是：**bi-encoder 粗筛出几十条 → cross-encoder 精排**。
+    这也解释了为什么重排**必须**放在召回之后，而且候选不能太多。
+    """
+    global _reranker
+    if _reranker is None:
+        try:
+            registered = {m["model"] for m in TextCrossEncoder.list_supported_models()}
+            if RERANK_MODEL not in registered:
+                TextCrossEncoder.add_custom_model(
+                    model=RERANK_MODEL,
+                    sources=ModelSource(hf=RERANK_MODEL),
+                    model_file=RERANK_MODEL_FILE,
+                    description="bge-reranker-base int8 量化版（多语言，约 266MB）",
+                    license="MIT",
+                    size_in_gb=0.26,
+                )
+            _reranker = TextCrossEncoder(model_name=RERANK_MODEL)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"加载重排模型 {RERANK_MODEL} 失败：{e}。"
+                "首次使用需下载约 266MB 权重；若网络不通，"
+                "可在 backend/.env 里加 HF_ENDPOINT=https://hf-mirror.com 后重启服务。"
+            ) from e
+    return _reranker
+
+
+def rerank_scores(query: str, texts: list[str]) -> list[float]:
+    """给每条候选打分——注意这里是**逐条**和问题一起过模型，所以慢。"""
+    return [float(s) for s in get_reranker().rerank(query, texts)]
+
+
+def hybrid_search(
+    query: str,
+    top_k: int = 3,
+    mode: str = "hybrid",
+    rerank: bool = False,
+    candidates: int = 10,
+) -> dict:
+    """阶段 08 的完整检索管道：
+
+        向量召回 ┐
+                 ├─ RRF 融合 ─（可选）Cross-encoder 重排 ─ 取 top_k
+        BM25 召回┘
+
+    返回的不只是结果，还有**一张排名对照表**——每个候选块在各阶段的
+    名次都摊开。这是本阶段最有说服力的一屏：你能亲眼看到阶段 07
+    排第 25 名的那个块，是怎么一路爬到第 1 名的。
+    """
+    import time as _time
+
+    rows = corpus()
+    timings: dict[str, float] = {}
+    if not rows:
+        return {"hits": [], "rows": [], "timings": timings}
+
+    # ① 两路召回（各自取 candidates 条，给融合留出余量）
+    t0 = _time.perf_counter()
+    vec = vector_ranking(query, candidates) if mode in ("vector", "hybrid") else []
+    timings["vector"] = round((_time.perf_counter() - t0) * 1000, 2)
+
+    t0 = _time.perf_counter()
+    bm = bm25_ranking(query, candidates) if mode in ("bm25", "hybrid") else []
+    timings["bm25"] = round((_time.perf_counter() - t0) * 1000, 2)
+
+    # ② 融合
+    t0 = _time.perf_counter()
+    if mode == "vector":
+        fused = vec
+    elif mode == "bm25":
+        fused = bm
+    else:
+        fused = bm25kit.rrf_fuse([[i for i, _ in vec], [i for i, _ in bm]])
+    timings["fuse"] = round((_time.perf_counter() - t0) * 1000, 2)
+
+    # ③ 重排（候选池取融合结果的前 candidates 条）
+    reranked: list[tuple[int, float]] = []
+    if rerank and fused:
+        pool = [i for i, _ in fused][: max(candidates, top_k)]
+        t0 = _time.perf_counter()
+        scores = rerank_scores(query, [rows[i]["text"] for i in pool])
+        reranked = sorted(zip(pool, scores), key=lambda p: (-p[1], p[0]))
+        timings["rerank"] = round((_time.perf_counter() - t0) * 1000, 2)
+
+    final = reranked or fused
+    final_ids = [i for i, _ in final[:top_k]]
+
+    # ④ 拼排名对照表
+    def ranks(pairs: list[tuple[int, float]]) -> dict[int, int]:
+        return {i: r for r, (i, _) in enumerate(pairs, 1)}
+
+    def scores_of(pairs: list[tuple[int, float]]) -> dict[int, float]:
+        return {i: s for i, s in pairs}
+
+    vr, br, fr, rr = ranks(vec), ranks(bm), ranks(fused), ranks(reranked)
+    vs, bs, fs, rs = scores_of(vec), scores_of(bm), scores_of(fused), scores_of(reranked)
+
+    pool_ids = sorted(
+        set(vr) | set(br) | set(fr) | set(rr),
+        key=lambda i: (fr.get(i, 10**6), vr.get(i, 10**6), br.get(i, 10**6)),
+    )
+    table = [
+        {
+            "title": rows[i]["title"],
+            "index": rows[i]["index"],
+            "text": rows[i]["text"],
+            "vector_rank": vr.get(i),
+            "bm25_rank": br.get(i),
+            "fused_rank": fr.get(i),
+            "rerank_rank": rr.get(i),
+            "vector_score": vs.get(i),
+            "bm25_score": bs.get(i),
+            "fused_score": fs.get(i),
+            "rerank_score": rs.get(i),
+            "in_final": i in final_ids,
+        }
+        for i in pool_ids
+    ]
+
+    hits = [
+        {
+            "title": rows[i]["title"],
+            "index": rows[i]["index"],
+            "text": rows[i]["text"],
+            # score 沿用阶段 07 的语义（余弦相似度），方便两个阶段对照；
+            # BM25 召回的块没有余弦分，就用 0 表示"不是靠语义进来的"。
+            "score": vs.get(i, 0.0),
+            "vector_score": vs.get(i),
+            "bm25_score": bs.get(i),
+            "rerank_score": rs.get(i),
+        }
+        for i in final_ids
+    ]
+
+    return {"hits": hits, "rows": table, "timings": timings, "final_ids": final_ids}
+
+
 # ---------- 生成 ----------
 
 RAG_SYSTEM_PROMPT = (
@@ -321,13 +595,23 @@ def ask(
     question: str,
     top_k: int = 3,
     model: str | None = None,
+    # 阶段 08 起新增（都有默认值，阶段 07 的调用方式不受影响）
+    mode: str = "vector",
+    rerank: bool = False,
+    candidates: int = 10,
 ) -> dict[str, Any]:
     """完整 RAG：检索 → 拼 prompt → 生成。
 
     返回里带上 `prompt` 和 `hits` 是有意的——**让用户看见模型到底看到了什么**。
     这是阶段 06 那条经验的延续：可解释性来自"把中间产物摊开"。
+
+    阶段 08 起，检索这一步换成了可配置的管道（纯向量 / BM25 / 混合 + 重排）。
+    默认仍是 `mode="vector"`，所以阶段 07 的行为**一字不变**。
     """
-    hits = search(question, top_k=top_k)
+    found = hybrid_search(
+        question, top_k=top_k, mode=mode, rerank=rerank, candidates=candidates
+    )
+    hits = found["hits"]
     prompt = build_prompt(question, hits)
     answer = client.chat(
         [
@@ -342,6 +626,10 @@ def ask(
         "hits": hits,
         "prompt": prompt,
         "model": model or client.model,
+        "mode": mode,
+        "rerank": rerank,
+        "rows": found["rows"],
+        "timings": found["timings"],
     }
 
 
