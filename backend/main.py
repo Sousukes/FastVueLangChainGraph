@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from collections.abc import Iterator
 
 from fastapi import FastAPI, HTTPException
@@ -31,6 +32,16 @@ from schemas import (
     MCPResourceContent,
     MCPRunRequest,
     MCPRunResponse,
+    RagAskRequest,
+    RagAskResponse,
+    RagDocument,
+    RagDocumentIn,
+    RagIngestResponse,
+    RagResetResponse,
+    RagSearchRequest,
+    RagSearchResponse,
+    RagSeedResponse,
+    RagStatus,
     ToolInfo,
     ToolRunRequest,
     ToolRunResponse,
@@ -40,6 +51,7 @@ from extract import extract_one
 from agent import run_tool_loop
 from tools import TOOLS
 from mcpkit.host import get_host
+import rag
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -209,3 +221,98 @@ def mcp_prompt(req: MCPPromptRequest) -> dict:
         return get_host().ensure_connected().get_prompt(req.name, req.arguments)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"取提示模板失败：{e}") from e
+
+
+# ---------- 阶段 07 · RAG（检索增强生成） ----------
+
+# 一键导入的示例语料：直接用本仓库自己的文档，
+# 让学员可以问"这门课讲了什么"——答案必须来自检索，而不是模型的记忆。
+# 只喂一句话的假数据看不出切块的效果，必须用真实长文档。
+SEED_FILES = ["DESIGN.md", "design-system.md"]
+# 再把各阶段教程也喂进去：学员读到这里时，前面几个阶段的正文已经是一份
+# 现成的语料。问"阶段 06 讲了什么"，答案就来自他自己刚读完的那一页。
+SEED_GLOB = "stages/*.md"
+
+
+@app.get("/api/rag/status", response_model=RagStatus)
+def rag_status() -> RagStatus:
+    """知识库状态：文档数 / 块数 / 嵌入模型 / 切块参数。
+
+    不依赖 LLM——和 MCP 目录一样，检索这条链路和模型是解耦的。
+    """
+    return RagStatus(**rag.stats())
+
+
+@app.get("/api/rag/documents", response_model=list[RagDocument])
+def rag_documents() -> list[RagDocument]:
+    return [RagDocument(**d) for d in rag.list_documents()]
+
+
+@app.post("/api/rag/documents", response_model=RagIngestResponse)
+def rag_add_document(req: RagDocumentIn) -> RagIngestResponse:
+    """入库一个文档：切块 → 嵌入 → 存进向量库。返回切块结果供前端展示。"""
+    try:
+        info = rag.add_document(req.title, req.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"入库失败：{e}") from e
+    return RagIngestResponse(**info)
+
+
+@app.delete("/api/rag/documents/{title}", response_model=RagResetResponse)
+def rag_delete_document(title: str) -> RagResetResponse:
+    return RagResetResponse(deleted=rag.delete_document(title))
+
+
+@app.post("/api/rag/seed", response_model=RagSeedResponse)
+def rag_seed() -> RagSeedResponse:
+    """一键导入本仓库的课程文档（docs/ 下的 md + 各阶段教程）。
+
+    真实长文档才能演示出"切块"这件事——一句话的示例文档切不出东西来。
+    """
+    docs_dir = Path(__file__).resolve().parent.parent / "docs"
+    paths = [docs_dir / name for name in SEED_FILES]
+    paths += sorted(docs_dir.glob(SEED_GLOB))
+
+    imported: list[dict] = []
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            imported.append(rag.add_document(path.stem, path.read_text(encoding="utf-8")))
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"导入 {path.name} 失败：{e}") from e
+    if not imported:
+        raise HTTPException(status_code=404, detail="没有找到可导入的示例文档")
+    return RagSeedResponse(imported=[RagIngestResponse(**i) for i in imported])
+
+
+@app.post("/api/rag/search", response_model=RagSearchResponse)
+def rag_search(req: RagSearchRequest) -> RagSearchResponse:
+    """**纯检索**：不调用 LLM，只回答"库里的哪些块跟这个问题最像"。
+
+    RAG 调优的第一条纪律就是先看这一步——检索错了，生成再强也救不回来。
+    """
+    try:
+        hits = rag.search(req.query, top_k=req.top_k)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"检索失败：{e}") from e
+    return RagSearchResponse(query=req.query, hits=hits)
+
+
+@app.post("/api/rag/ask", response_model=RagAskResponse)
+def rag_ask(req: RagAskRequest) -> RagAskResponse:
+    """完整 RAG：检索 → 拼 prompt → 生成。返回里带上 prompt，让"增强"这一步可见。"""
+    client = get_client()
+    try:
+        outcome = rag.ask(client, req.question, top_k=req.top_k, model=req.model)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"RAG 问答失败：{e}") from e
+    return RagAskResponse(**outcome)
+
+
+@app.post("/api/rag/reset", response_model=RagResetResponse)
+def rag_reset() -> RagResetResponse:
+    """清空知识库（教学用：调完切块参数可以重来一遍）。"""
+    before = rag.stats()["chunks"]
+    rag.reset()
+    return RagResetResponse(deleted=before)

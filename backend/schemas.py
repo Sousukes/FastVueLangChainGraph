@@ -188,3 +188,83 @@ class MCPResourceContent(BaseModel):
 class MCPPromptRequest(BaseModel):
     name: str = Field(min_length=1)
     arguments: dict = Field(default_factory=dict)
+
+
+# ---------- 阶段 07 · RAG（检索增强生成） ----------
+
+
+class RagStatus(BaseModel):
+    """知识库状态。embedModel 要露出来——换嵌入模型会让旧向量全部作废。"""
+
+    collection: str
+    documents: int
+    chunks: int
+    embedModel: str
+    chunkSize: int
+    chunkOverlap: int
+    persistDir: str
+
+
+class RagDocumentIn(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    text: str = Field(min_length=1)
+
+
+class RagDocument(BaseModel):
+    title: str
+    chunks: int
+    chars: int
+
+
+class RagIngestResponse(BaseModel):
+    """入库结果。preview 是**切块后的真实文本**，让用户看见"文档被切成了什么样"。"""
+
+    title: str
+    chunks: int
+    chars: int
+    preview: list[str] = Field(default_factory=list)
+
+
+class RagHit(BaseModel):
+    """一条检索命中。score 是余弦相似度（越大越像），已从 distance 换算过来。"""
+
+    title: str
+    index: int
+    score: float
+    text: str
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(default=3, ge=1, le=10)
+
+
+class RagSearchResponse(BaseModel):
+    query: str
+    hits: list[RagHit] = Field(default_factory=list)
+
+
+class RagAskRequest(BaseModel):
+    question: str = Field(min_length=1)
+    top_k: int = Field(default=3, ge=1, le=10)
+    model: str | None = None
+
+
+class RagAskResponse(BaseModel):
+    """RAG 问答结果。prompt 一并返回是本阶段的重点：
+
+    「检索到的内容究竟是怎么进到模型里的」——把它摊开，RAG 才不是黑盒。
+    """
+
+    answer: str
+    hits: list[RagHit] = Field(default_factory=list)
+    prompt: str
+    model: str
+
+
+class RagSeedResponse(BaseModel):
+    imported: list[RagIngestResponse] = Field(default_factory=list)
+
+
+class RagResetResponse(BaseModel):
+    deleted: int

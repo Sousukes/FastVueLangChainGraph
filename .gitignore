@@ -9,6 +9,12 @@ node_modules/
 dist/
 *.local
 
+# Vite 在改配置时会写这种临时文件
+vite.config.ts.timestamp-*
+
+# 阶段 07 起：ChromaDB 的本地落盘目录（删掉它就等于清空知识库）
+.chroma/
+
 # env / secrets（注意：.env.example 需要提交，.env 不能提交）
 .env
 
