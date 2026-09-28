@@ -48,7 +48,9 @@ export const PRESET_QUESTIONS: Array<{ label: string; question: string; hint: st
   },
   {
     label: '连续两轮',
-    question: '北京现在多少度？如果超过 28 度，把它换算成华氏度告诉我。',
+    // 用深圳（32℃）而不是北京（26℃）：条件成立才会触发第二次工具调用，
+    // 否则模型会正确地"只查天气、不换算"——那也是一种正确行为，但演示不出两轮链路。
+    question: '深圳现在多少度？如果超过 28 度，把它换算成华氏度告诉我。',
     hint: 'get_weather → calculator',
   },
   {

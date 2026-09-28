@@ -112,7 +112,7 @@ function toolName(t: ToolInfo) {
           type="textarea"
           :rows="6"
           resize="none"
-          placeholder="例如：北京现在多少度？如果超过 28 度，帮我换算成华氏度"
+          placeholder="例如：深圳现在多少度？如果超过 28 度，帮我换算成华氏度"
         />
 
         <div class="run-row">
