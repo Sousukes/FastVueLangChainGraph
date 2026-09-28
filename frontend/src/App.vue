@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import AppHeader from './components/AppHeader.vue'
 import StageRail from './components/StageRail.vue'
-import ChatPanel from './components/ChatPanel.vue'
+import PromptLab from './components/PromptLab.vue'
 
 // 当前阶段配置（与 docs/DESIGN.md 三·阶段映射总表 对齐）
-const CURRENT_STAGE = 1
-const STAGE_TITLE = '大模型 API 编程'
+const CURRENT_STAGE = 2
+const STAGE_TITLE = 'Prompt 工程'
 
-// 阶段导航：阶段 01 仅作 UI 占位，真实路由在阶段 06 主线接入
+// 阶段导航：阶段 02 仅作 UI 占位，真实路由在阶段 06 主线接入
 function onNavigate(stage: number) {
-  console.info(`[stage-rail] 请求跳转阶段 ${stage}（阶段 01 暂未接入路由）`)
+  console.info(`[stage-rail] 请求跳转阶段 ${stage}（阶段 02 暂未接入路由）`)
 }
 </script>
 
@@ -19,7 +19,7 @@ function onNavigate(stage: number) {
     <div class="app-main">
       <AppHeader :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
       <main class="app-console">
-        <ChatPanel :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
+        <PromptLab :stage="CURRENT_STAGE" :title="STAGE_TITLE" />
       </main>
     </div>
   </div>
