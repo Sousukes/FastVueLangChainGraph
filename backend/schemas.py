@@ -2,11 +2,12 @@
 
 阶段 03：多轮对话（messages 全量回放）
 阶段 04：结构化抽取（动态字段定义 + Pydantic 校验结果回传）
+阶段 05：函数调用（工具说明书 + 调用 trace）
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -78,3 +79,39 @@ class ExtractResponse(BaseModel):
     model: str
     error: str | None = None
     warning: str | None = None  # 例如「JSON 模式不支持，已降级」
+
+
+# ---------- 阶段 05 · 函数调用 ----------
+
+
+class ToolInfo(BaseModel):
+    """给前端展示的"工具说明书"，与发给模型的内容同源（都来自 Pydantic 模型）。"""
+
+    name: str
+    description: str
+    parameters: dict
+
+
+class ToolRunRequest(BaseModel):
+    question: str = Field(min_length=1)
+    model: str | None = None
+    max_steps: int = Field(default=4, ge=1, le=8, description="工具循环的最大轮数（防跑飞）")
+
+
+class TraceStep(BaseModel):
+    """一次工具调用的完整记录——前端把它摊成时间线，回答就变得可解释了。"""
+
+    step: int
+    tool: str
+    arguments: Any = None
+    result: Any = None
+    error: str | None = None
+    ms: float = 0.0
+
+
+class ToolRunResponse(BaseModel):
+    answer: str | None = None
+    trace: list[TraceStep] = Field(default_factory=list)
+    steps: int = 0
+    model: str
+    exhausted: bool = False  # True = 到了 max_steps 仍未给出最终答案

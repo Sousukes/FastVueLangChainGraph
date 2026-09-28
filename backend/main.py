@@ -21,8 +21,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from llm import LLMClient, LLMNotConfiguredError
-from schemas import ChatRequest, ChatResponse, ExtractRequest, ExtractResponse, to_dicts
+from schemas import (
+    ChatRequest,
+    ChatResponse,
+    ExtractRequest,
+    ExtractResponse,
+    ToolInfo,
+    ToolRunRequest,
+    ToolRunResponse,
+    to_dicts,
+)
 from extract import extract_one
+from agent import run_tool_loop
+from tools import TOOLS
 
 app = FastAPI(title="AI 研究助手 · 阶段 03（多轮对话与流式）")
 
@@ -119,3 +130,26 @@ def extract(req: ExtractRequest) -> ExtractResponse:
         return extract_one(client, req)
     except Exception as e:  # 上游模型调用 / schema 编译等真异常
         raise HTTPException(status_code=502, detail=f"抽取失败：{e}") from e
+
+
+@app.get("/api/tools", response_model=list[ToolInfo])
+def list_tools() -> list[ToolInfo]:
+    """工具清单（不依赖模型，没有 Key 也能看）。
+
+    内容与发给模型的 tools 参数同源：都来自 Pydantic 模型的 model_json_schema()。
+    """
+    return [
+        ToolInfo(name=t.name, description=t.description, parameters=t.args_model.model_json_schema())
+        for t in TOOLS.values()
+    ]
+
+
+@app.post("/api/tools/run", response_model=ToolRunResponse)
+def tools_run(req: ToolRunRequest) -> ToolRunResponse:
+    """跑一轮带工具的对话：模型决定调什么 → 我们执行 → 结果回喂 → 直到给出答案。"""
+    client = get_client()
+    try:
+        outcome = run_tool_loop(client, req.question, model=req.model, max_steps=req.max_steps)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"工具调用失败：{e}") from e
+    return ToolRunResponse(**outcome)
