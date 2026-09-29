@@ -99,6 +99,7 @@ import harness
 import agentic
 import search
 import research
+import vision  # noqa: F401  端点函数体里用到；漏了它 import main 照样成功，首次调用才 500
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
