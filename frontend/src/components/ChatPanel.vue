@@ -1,4 +1,19 @@
 <script setup lang="ts">
+/*
+ * ⚠️ 刻意保留的教学快照 —— 主线零引用是预期的，请勿当死代码删除。
+ *
+ * 这是【阶段 01】的控制台本体。阶段 01–05 的前端是"单组件模式"：App.vue 硬编码
+ * CURRENT_STAGE，只渲染这一个 console 组件（stage-01 → ChatPanel，stage-02 → PromptLab，
+ * stage-03 → StreamChat）。每做一个新阶段就换一个新组件，旧的留在这里不动。
+ *
+ * 为何阶段 06 路由化后没给它配路由（stages.ts 里 id=1 是 path: null）：
+ *   本组件是【浏览器直连】DeepSeek——UI 上就有"粘贴 API Key"输入框；而阶段 03 起全站
+ *   改为 FastAPI 代理 + SSE，密钥只存后端 .env。给它开路由，等于让主线产品重新长出
+ *   "把密钥填进浏览器"这个反模式，而那正是阶段 03 刻意改掉的东西。
+ *   （对照 ../composables/useDeepSeek.ts 头部注释、docs/stages/01-*.md）
+ *
+ * stage-01 分支里永久保留着它的历史快照，本文件删除也不影响那边的 `git diff` 叙事。
+ */
 import { ref, computed } from 'vue'
 import { useDeepSeek } from '../composables/useDeepSeek'
 

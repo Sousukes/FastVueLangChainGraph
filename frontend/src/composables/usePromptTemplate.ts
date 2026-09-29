@@ -1,3 +1,9 @@
+/*
+ * ⚠️ 刻意保留的教学快照 —— 主线零引用是预期的，请勿当死代码删除。
+ *
+ * 本 composable 只被 ../components/PromptLab.vue（阶段 02 控制台本体）使用；
+ * PromptLab 未在路由表里取得页面，所以这里看起来"没人用"。背景见该文件头部注释。
+ */
 import { ref, computed, reactive } from 'vue'
 
 export interface PromptPreset {

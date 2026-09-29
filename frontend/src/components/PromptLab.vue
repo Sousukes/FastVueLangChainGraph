@@ -1,4 +1,16 @@
 <script setup lang="ts">
+/*
+ * ⚠️ 刻意保留的教学快照 —— 主线零引用是预期的，请勿当死代码删除。
+ *
+ * 这是【阶段 02】的控制台本体。当时 App.vue 硬编码 CURRENT_STAGE=2，直接渲染本组件
+ * （阶段 01–05 均为"单组件模式"，每阶段换一个 console 组件，旧的留在这里不动）。
+ *
+ * 为何阶段 06 路由化后没给它配路由（stages.ts 里 id=2 是 path: null）：
+ *   本组件同样【浏览器直连】DeepSeek；阶段 03 起全站改为 FastAPI 代理 + SSE，
+ *   密钥只存后端 .env。给它开路由会让主线产品重新出现"把密钥填进浏览器"的反模式。
+ *
+ * stage-02 分支里永久保留着它的历史快照。
+ */
 import { ref, computed } from 'vue'
 import { useDeepSeek } from '../composables/useDeepSeek'
 import { usePromptTemplate, PRESETS } from '../composables/usePromptTemplate'

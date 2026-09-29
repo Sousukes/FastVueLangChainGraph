@@ -1,3 +1,12 @@
+/*
+ * ⚠️ 刻意保留的教学快照 —— 主线零引用是预期的，请勿当死代码删除。
+ *
+ * 本 composable 只被阶段 01/02 的两个控制台组件使用（ChatPanel / PromptLab），
+ * 它们未在路由表里取得页面，所以这里看起来"没人用"。背景见两组件头部注释。
+ *
+ * 另外这也是全站唯一一处"浏览器直连厂商 API"的实现 —— 阶段 03 起已改由后端代理，
+ * 后续阶段请勿再引用本文件，统一走 `/api/*`。
+ */
 import { ref, shallowRef, readonly } from 'vue'
 
 export interface ChatMessage {

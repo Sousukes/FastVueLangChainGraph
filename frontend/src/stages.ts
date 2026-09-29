@@ -6,6 +6,14 @@
  * 避免两处各写一份而逐渐漂移。
  *
  * `path` 为 null 表示该阶段尚无页面（点进去会看到占位页）。
+ *
+ * ⚠️ id=1（ChatPanel.vue）/ id=2（PromptLab.vue）是**刻意不接路由**，不是漏做了：
+ *    阶段 01–05 的前端是"单组件模式"（App.vue 硬编码 CURRENT_STAGE，渲染那一个组件），
+ *    阶段 06 才升级为多路由；而这两个组件是【浏览器直连】DeepSeek 的教学实现
+ *    （UI 上带"粘贴 API Key"输入框），与阶段 03 起"一律走后端代理、密钥只存 .env"
+ *    的架构冲突，接入反而会让主线长出一个被刻意淘汰的反模式。
+ *    故保持 null，组件与其 composable 作为阶段快照留在 components/ 与 composables/ 下，
+ *    **请勿当作未使用代码删除**；历史快照在 `stage-01` / `stage-02` 分支各自保留。
  */
 
 export interface StageMeta {
