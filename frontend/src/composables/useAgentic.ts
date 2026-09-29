@@ -101,22 +101,31 @@ export interface UseAgenticOptions {
   apiBase?: string
 }
 
-/** 预设：分别用来演示"不需要检索"与"第一轮不够→改写+换通道" */
+/**
+ * 预设：四个都来自**本机实跑**（DeepSeek-Flash），期望值是实测出来的，不是猜的。
+ *
+ * 顺序刻意按"决策复杂度"递增排列：跳过 → 一轮命中 → 改写后命中 → 通道用尽。
+ */
 export const AGENTIC_PRESETS: Array<{ label: string; question: string; hint: string }> = [
   {
-    label: '不该检索的问题',
+    label: '① 不该检索',
     question: '1 加 1 等于几？顺便用一句话说明为什么。',
-    hint: '期望：route 判定无需检索，整条检索链路被跳过',
+    hint: '实测：route 判为无需检索 → rounds=0，约 2.3s。对照下面几例，这就是省下的那一刀',
   },
   {
-    label: '需要检索（大概率一轮中）',
+    label: '② 一轮命中',
     question: 'RAG 的切块大小一般取多少？为什么要留重叠？',
-    hint: '期望：第一轮 vector 就够用，不进第二轮',
+    hint: '实测：第 1 轮 vector 评级"够用"后直接收手，约 10.5s',
   },
   {
-    label: '偏门说法（易触发改写）',
+    label: '③ 改写 + 换通道',
     question: '课程里那个把两段 reorder 过一遍再取前三的做法叫什么？',
-    hint: '期望：第一轮不够 → 改写术语 → 第二轮升到 hybrid + 重排命中',
+    hint: '实测：第 1 轮评级不足 → 改写术语 → 第 2 轮升到 hybrid+重排命中，约 29.2s',
+  },
+  {
+    label: '④ 走到图谱通道',
+    question: '知识图谱里 BM25 这个概念和重排、混合检索之间是什么关系？',
+    hint: '实测：连输两轮 → 第 3 轮切到 graph 仍为空 → 如实回答"资料里没有"，约 31.3s',
   },
 ]
 
