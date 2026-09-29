@@ -1,0 +1,8 @@
+# 与 frontend/ 保持一致的 pnpm 约定（见 frontend/pnpm-workspace.yaml）：
+#   allowBuilds          —— 允许 esbuild 跑安装脚本，否则 vitepress 起不来
+#   nodeLinker: hoisted  —— 用扁平的真实目录，不用符号链接。
+#     默认的 isolated 布局在本机会被安全软件剥离（node_modules/vitepress 变成空目录、
+#     .bin 变空），装完却跑不了 `vitepress build`；hoisted 布局对此免疫。
+allowBuilds:
+  esbuild: true
+nodeLinker: hoisted

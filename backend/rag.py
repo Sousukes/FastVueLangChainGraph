@@ -162,10 +162,6 @@ def embed_query(text: str) -> list[float]:
     return next(iter(get_embedder().query_embed([text]))).tolist()
 
 
-def embedding_dim() -> int:
-    return len(embed_query("维度探测"))
-
-
 # ---------- 向量库 ----------
 
 
