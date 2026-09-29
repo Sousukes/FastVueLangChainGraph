@@ -38,6 +38,10 @@ from schemas import (
     AgenticRunResponse,
     SearchRequest,
     SearchResponse,
+    ResearchRequest,
+    ResearchResponse,
+    ResearchSectionSummary,
+    ResearchSource,
     ChatRequest,
     ChatResponse,
     ExtractRequest,
@@ -90,6 +94,7 @@ import team
 import harness
 import agentic
 import search
+import research
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -975,5 +980,96 @@ def search_stream(req: SearchRequest) -> StreamingResponse:
                 yield sse(event)
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"AI 搜索运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 15 · Deep Research ----------
+
+
+@app.post("/api/research/run", response_model=ResearchResponse)
+def research_run(req: ResearchRequest) -> ResearchResponse:
+    """非流式：跑完「规划 → 逐节自适应检索 → 带引用报告 → 忠实性校验」。
+
+    `faithful` / `faithfulness` 是阶段 15 相对阶段 14 新增的字段：阶段 14 只验证
+    「模型**声称**引用了」，本阶段额外用一次 LLM 调用逐句核对报告是否真的被资料支持。
+    `unsupported` 列出了核查中判为「资料无法支持」的结论原文，供前端标红。
+    """
+    client = get_client()
+    try:
+        result = research.run_research_blocking(
+            client,
+            req.question,
+            model=req.model,
+            top_k=req.topK,
+            rerank=req.rerank,
+            snippet=req.snippet,
+            max_sections=req.maxSections,
+            hops=req.hops,
+            max_rounds=req.maxRounds,
+            temperature=req.temperature,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"深度研究运行失败：{e}") from e
+
+    return ResearchResponse(
+        question=result["question"],
+        answer=result.get("answer"),
+        model=result.get("model", client.model),
+        sections=[ResearchSectionSummary(**s) for s in result.get("sections", [])],
+        sources=[ResearchSource(**s) for s in result.get("sources", [])],
+        citations=result.get("citations", []),
+        grounded=result.get("grounded", False),
+        coverage=result.get("coverage", 0.0),
+        faithful=result.get("faithful", False),
+        faithfulness=result.get("faithfulness", 0.0),
+        unsupported=result.get("unsupported", []),
+        times=result.get("times", {}),
+        totalMs=result.get("totalMs", 0.0),
+        llmMs=result.get("llmMs", 0.0),
+        error=result.get("error"),
+    )
+
+
+@app.post("/api/research/stream")
+def research_stream(req: ResearchRequest) -> StreamingResponse:
+    """**流式**：逐事件推，前端据此渲染大纲、分段进度、报告与忠实性结果。
+
+    帧协议（`type` 即帧类型）：
+
+        data: {"type":"start",     "question":"...", "maxSections":4}
+        data: {"type":"plan",      "sections":[{"title":"...","question":"..."}]}
+        data: {"type":"section_start", "index":1, "title":"...", "subQuestion":"..."}
+        data: {"type":"section_retrieve", "index":1, "rounds":2, "basedOn":"hybrid", "hitCount":4, "ms":..}
+        data: {"type":"section_answer_delta", "index":1, "text":"..."}
+        data: {"type":"answer_delta", "text":"## 标题\\n\\n..."}
+        data: {"type":"section_finish", "index":1, "citations":[1,3], "grounded":true}
+        data: {"type":"synthesize", "status":"ok", "sectionCount":4, "sourceCount":12}
+        data: {"type":"faithfulness", "score":0.92, "faithful":true, "unsupported":[]}
+        data: {"type":"finish", "answer":"...", "sources":[...], "citations":[1,3,5], "grounded":true, "faithful":true, "faithfulness":0.92, "unsupported":[], "times":{...}}
+        data: {"type":"error",     "message":"..."}
+
+    ⭐ `finish.sources` 每条带 `cited` 与 `channel`；`finish.faithful` / `faithfulness` /
+       `unsupported` 是阶段 15 的签名产出，前端据此把"可验证"再往前推一步到"已核查"。
+    """
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in research.run_research(
+                client,
+                req.question,
+                model=req.model,
+                top_k=req.topK,
+                rerank=req.rerank,
+                snippet=req.snippet,
+                max_sections=req.maxSections,
+                hops=req.hops,
+                max_rounds=req.maxRounds,
+                temperature=req.temperature,
+            ):
+                yield sse(event)
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"深度研究运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())

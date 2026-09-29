@@ -870,3 +870,74 @@ class SearchResponse(BaseModel):
     totalMs: float = 0.0
     llmMs: float = 0.0
     error: str | None = None
+
+
+# ---------- 阶段 15 · Deep Research ----------
+
+
+class ResearchRequest(BaseModel):
+    """跑一次深度研究（规划大纲 → 逐节自适应检索 → 带引用报告 → 忠实性校验）。
+
+    与阶段 14 不同，这里把"一个问题"拆成"一组子问题"，每个子问题各自跑一遍
+    阶段 13 的自适应检索（route→grade→rewrite 升级通道），最后把所有小节合并成
+    一篇全局重新编号引用的长报告，并用一次额外 LLM 调用做忠实性核查。
+    """
+
+    question: str = Field(min_length=1)
+    model: str | None = None
+    topK: int = Field(default=4, ge=1, le=10, description="每个子问题检索返回的候选片段数")
+    rerank: bool = Field(default=True, description="是否对混合检索结果做 Cross-encoder 重排")
+    snippet: int = Field(default=240, ge=60, le=600, description="来源面板里每段预览截断的字符数")
+    maxSections: int = Field(
+        default=4, ge=1, le=6, description="研究大纲的小节数（即要把问题拆成几个子问题去查）"
+    )
+    hops: int = Field(default=2, ge=1, le=3, description="图谱通道的扩展跳数")
+    maxRounds: int = Field(default=3, ge=1, le=3, description="每个子问题最多几轮自适应检索")
+    temperature: float = 0.3
+
+
+class ResearchSectionSummary(BaseModel):
+    """研究报告里的一节：它的子问题、检索情况与本地引用。"""
+
+    index: int
+    title: str
+    subQuestion: str
+    rounds: int = 0
+    basedOn: str = "none"
+    hitCount: int = 0
+    citations: list[int] = Field(default_factory=list, description="本节答案里出现的（重编号后的）引用编号")
+    grounded: bool = False
+
+
+class ResearchSource(BaseModel):
+    """全局来源面板里的一条（跨所有小节去重合并后）。"""
+
+    rank: int
+    index: int
+    title: str
+    snippet: str
+    score: float | None = None
+    rerankScore: float | None = None
+    channel: str | None = None
+    section: int | None = None
+    cited: bool = False
+
+
+class ResearchResponse(BaseModel):
+    """深度研究的完整结果：带全局引用的大报告 + 逐节小结 + 来源面板 + 忠实性核查。"""
+
+    question: str
+    answer: str | None = None
+    model: str
+    sections: list[ResearchSectionSummary] = Field(default_factory=list)
+    sources: list[ResearchSource] = Field(default_factory=list)
+    citations: list[int] = Field(default_factory=list, description="全局引用编号（已校验、去重、按序）")
+    grounded: bool = False
+    coverage: float = 0.0
+    faithful: bool = False
+    faithfulness: float = 0.0
+    unsupported: list[str] = Field(default_factory=list, description="忠实性核查中判为「资料无法支持」的结论原文")
+    times: dict[str, float] = Field(default_factory=dict)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    error: str | None = None
