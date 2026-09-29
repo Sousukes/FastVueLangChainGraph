@@ -30,6 +30,9 @@ from fastapi.responses import StreamingResponse
 
 from llm import LLMClient, LLMNotConfiguredError
 from schemas import (
+    AgentRunRequest,
+    AgentRunResponse,
+    AgentToolsResponse,
     ChatRequest,
     ChatResponse,
     ExtractRequest,
@@ -71,6 +74,7 @@ from tools import TOOLS
 from mcpkit.host import get_host
 import rag
 import graph
+import react
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -534,3 +538,90 @@ def graph_reset() -> GraphResetResponse:
     return GraphResetResponse(
         deletedEntities=before["entities"], deletedEdges=before["edges"]
     )
+
+
+# ---------- 阶段 10 · 单智能体（ReAct） ----------
+
+
+@app.get("/api/agent/tools", response_model=AgentToolsResponse)
+def agent_tools() -> AgentToolsResponse:
+    """工具目录：给前端渲染勾选框，并把"重叠"照实报出来。
+
+    注意这里**会拉起 MCP server 子进程**（要问它有哪些工具）。这是目录接口该付的成本——
+    它只在页面加载时调一次，而 `build_schemas()` 在每轮对话开头都会调，
+    那边就必须懒加载（见 `react._group_tools`）。
+    """
+    return AgentToolsResponse(**react.tool_catalog())
+
+
+@app.post("/api/agent/run", response_model=AgentRunResponse)
+def agent_run(req: AgentRunRequest) -> AgentRunResponse:
+    """非流式：跑完整个 ReAct 循环，一次性返回结果 + 结构化 trace。
+
+    适合程序化调用和对照实验——**同样的参数，`/stream` 与 `/run` 结果完全一致**，
+    只是后者要等到最后才给你看。
+    """
+    client = get_client()
+    groups = req.groups or list(react.DEFAULT_GROUPS)
+    try:
+        result = react.run_react_blocking(
+            client,
+            req.question,
+            model=req.model,
+            max_steps=req.max_steps,
+            temperature=req.temperature,
+            groups=groups,
+            observation_limit=req.observation_limit,
+            max_repeat=req.max_repeat,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"智能体运行失败：{e}") from e
+    return AgentRunResponse(**{k: v for k, v in result.items() if k != "events"})
+
+
+@app.post("/api/agent/stream")
+def agent_stream(req: AgentRunRequest) -> StreamingResponse:
+    """**流式**：逐事件推。ReAct 的演示价值全在"看着它想"。
+
+    帧协议（事件类型即帧的 `type`）：
+        data: {"type":"start",       "tools":[...], "groups":[...], "maxSteps":6}
+        data: {"type":"delta",       "step":1, "text":"..."}        ← 可连续多帧
+        data: {"type":"action",      "step":1, "tool":"...", "arguments":{...}, "repeat":0}
+        data: {"type":"observation", "step":1, "ok":true, "content":"...", "truncated":false, "ms":12.3}
+        data: {"type":"step_end",    "step":1, "contextChars":2971}
+        data: {"type":"finish",      "reason":"answered", "answer":"...", "steps":2, "trace":[...]}
+        data: {"type":"error",       "message":"..."}
+
+    ⚠️ `delta` 是**中性**的：流式下没法提前知道这一轮文本是"思考"还是"最终答案"，
+    唯一的分界线是这一步结束时**有没有 `action`**。所以前端要"先流出来、再定性"——
+    收到该 step 的 `action` 就把缓冲落成 Thought；收到 `finish` 就丢掉缓冲、改用
+    `finish.answer`（权威版本，还带收口原因与 trace）。
+
+    ⭐ **请和阶段 09 的 `/api/graph/build/stream` 对照着读。**
+    那一边要"后台线程 + `queue.Queue` + 哨兵"，这一边没有——直接 for 循环 `yield` 就完了。
+    差别不在技巧，在**控制权**：阶段 09 的 `graph.build()` 是个阻塞的黑盒，
+    我们没法从它肚子里掏进度，只能另开一条线程；而 ReAct 这个循环**是我们自己写的**，
+    每一步都在我们的控制流里，想在哪 `yield` 就在哪 `yield`。
+    **能自己拆开的流程，就别用线程去绕。** 线程带来的每一个队列和哨兵，
+    都是将来某次"卡住不动"的伏笔。
+    """
+    client = get_client()
+    groups = req.groups or list(react.DEFAULT_GROUPS)
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in react.run_react(
+                client,
+                req.question,
+                model=req.model,
+                max_steps=req.max_steps,
+                temperature=req.temperature,
+                groups=groups,
+                observation_limit=req.observation_limit,
+                max_repeat=req.max_repeat,
+            ):
+                yield sse(event)
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"智能体运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())

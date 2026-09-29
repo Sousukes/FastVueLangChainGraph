@@ -3,6 +3,8 @@
 阶段 03：多轮对话（messages 全量回放）
 阶段 04：结构化抽取（动态字段定义 + Pydantic 校验结果回传）
 阶段 05：函数调用（工具说明书 + 调用 trace）
+阶段 09：GraphRAG（实体 / 边 / 源块 / 三段时间）
+阶段 10：单智能体（工具目录 + 步数预算 + 结构化 trace）
 """
 
 from __future__ import annotations
@@ -480,3 +482,127 @@ class GraphOverview(BaseModel):
 class GraphResetResponse(BaseModel):
     deletedEntities: int
     deletedEdges: int
+
+
+# ---------- 阶段 10 · 单智能体（ReAct） ----------
+
+
+class AgentToolInfo(BaseModel):
+    """工具说明书的一条。`server` 只有 MCP 工具才有值。
+
+    `description` 单独回传，是因为它**不是装饰**——对 agent 来说 description 就是 prompt，
+    它决定了模型会不会、以及什么时候选这个工具。前端把原文摊开显示，
+    用户才能理解"改一句话，命中率就变了"。
+    """
+
+    name: str
+    description: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    server: str | None = None
+
+
+class AgentToolGroup(BaseModel):
+    """一组可开关的工具。
+
+    让用户**亲手勾掉几组**、再问同一个问题，是理解"工具面"最直观的办法——
+    比任何"工具越多越容易选错"的说教都管用。
+    """
+
+    group: str
+    label: str
+    tools: list[AgentToolInfo] = Field(default_factory=list)
+    error: str | None = None
+
+
+class AgentToolOverlap(BaseModel):
+    """被**多个组同时提供**的工具。
+
+    阶段 06 的 MCP server 就是阶段 05 那批工具的封装（`mcpkit/server.py` 里
+    `for t in TOOLS.values()`），所以默认就存在 4 个重名。而 OpenAI 协议不允许重名工具，
+    必须按优先级去重——`winner` 就是最终生效的那一组。
+
+    **把重叠照实报出来，比悄悄藏起来有价值**：它正好说明"工具面是需要设计的"。
+    """
+
+    name: str
+    groups: list[str] = Field(default_factory=list)
+    winner: str
+
+
+class AgentToolsResponse(BaseModel):
+    """工具目录。`priority` 是去重优先级（即生效顺序）。"""
+
+    groups: list[AgentToolGroup] = Field(default_factory=list)
+    overlaps: list[AgentToolOverlap] = Field(default_factory=list)
+    priority: list[str] = Field(default_factory=list)
+
+
+class AgentRunRequest(BaseModel):
+    """跑一次 ReAct。这几个旋钮**每一个都能单独做一次实验**：
+
+    - `groups`：勾掉 RAG，看模型还会不会硬答课程问题
+    - `max_steps`：调到 1，看它在信息不足时怎么收口
+    - `observation_limit`：调到 200，看截断会不会让它漏掉关键信息
+    - `max_repeat`：调到 1，死循环检测会立刻触发
+    """
+
+    question: str = Field(min_length=1)
+    model: str | None = None
+    max_steps: int = Field(default=6, ge=1, le=12, description="步数预算：用完就禁用工具、逼它收口")
+    temperature: float = Field(default=0.2, ge=0.0, le=1.5)
+    # 不在这里写默认值：默认组由 react.DEFAULT_GROUPS 定义，写两份迟早会不一致。
+    # None = "用默认组"。
+    groups: list[str] | None = None
+    observation_limit: int = Field(
+        default=1200, ge=200, le=4000, description="单条 Observation 的字符上限（防上下文膨胀）"
+    )
+    max_repeat: int = Field(
+        default=2, ge=1, le=5, description="同一 (工具, 参数) 允许重复几次；超过就硬停"
+    )
+
+
+class AgentAction(BaseModel):
+    """一次工具调用。`ok` 与 `ms` 是**把工具当"外部世界"来看**的两个数：
+
+    调用可能失败（世界不总配合），也可能很慢（走 MCP 要跨进程）。
+    """
+
+    tool: str
+    arguments: Any = None
+    ok: bool
+    ms: float = 0.0
+    chars: int = 0
+
+
+class AgentStep(BaseModel):
+    """一轮 Thought → Action → Observation。`thought` 是这一轮模型写下的推理。"""
+
+    step: int
+    thought: str = ""
+    llmMs: float = 0.0
+    actions: list[AgentAction] = Field(default_factory=list)
+
+
+class AgentRunResponse(BaseModel):
+    """一次完整运行的收口结果。
+
+    `reason` 有四种，**它们本身就是本阶段要讲的知识点**：
+        answered   —— 模型自己认为信息够了（正常收口）
+        exhausted  —— 步数用尽，被强制收口（预算纪律）
+        loop       —— 检测到重复调用，被拒绝后收口（死循环纪律）
+        error      —— 链路出错
+    """
+
+    question: str
+    answer: str | None = None
+    reason: str
+    steps: int = 0
+    model: str
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    groups: list[str] = Field(default_factory=list)
+    # 本轮**实际**交给模型的工具面。把它和工具目录对照，
+    # 就能一眼看出哪些工具被去重挤掉了。
+    tools: list[str] = Field(default_factory=list)
+    trace: list[AgentStep] = Field(default_factory=list)
+    error: str | None = None
