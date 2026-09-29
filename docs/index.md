@@ -4,7 +4,16 @@
 覆盖大模型 API 编程、Prompt、流式、结构化输出、函数调用、MCP、RAG、GraphRAG、Agent、
 Deep Research、多模态到 Computer Use。
 
-- 📐 [课程设计树](/DESIGN)
+## 已发布阶段
+
 - 🛠️ [阶段 00 · 环境准备](/stages/00-环境准备)
+- 🔌 [阶段 01 · 大模型 API 编程基础](/stages/01-大模型API编程基础)
+- ✍️ [阶段 02 · Prompt 工程（模板实验台）](/stages/02-Prompt工程)
+
+## 课程资料
+
+- 📐 [课程设计树](/DESIGN)
+- 🎨 [前端设计系统](/design-system)
 
 > 代码仓库采用 monorepo + 阶段分支（`stage-00 … stage-18`），每个分支是对应阶段的完整快照。
+> 阶段 01–05 为独立练习（能力积木），阶段 06 起并入主线项目「全栈 AI 研究助手」。

@@ -1,4 +1,19 @@
 import { defineConfig } from 'vitepress'
+import { readdirSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// 自动收录 docs/stages/ 下的阶段教程（文件名前缀 00–18 决定顺序），
+// 之后新增阶段无需再改本文件。
+const stagesDir = resolve(dirname(fileURLToPath(import.meta.url)), '../stages')
+const stageItems = readdirSync(stagesDir)
+  .filter((f) => f.endsWith('.md'))
+  .sort()
+  .map((f) => {
+    const slug = f.replace(/\.md$/, '')
+    const [no, ...rest] = slug.split('-')
+    return { text: `${no} · ${rest.join('-')}`, link: `/stages/${encodeURIComponent(slug)}` }
+  })
 
 export default defineConfig({
   title: 'FastAPI + Vue3 全栈 LLM 实战',
@@ -8,13 +23,15 @@ export default defineConfig({
     sidebar: [
       {
         text: '课程设计',
-        items: [{ text: '设计树 DESIGN', link: '/DESIGN' }]
+        items: [
+          { text: '设计树 DESIGN', link: '/DESIGN' },
+          { text: '前端设计系统', link: '/design-system' },
+        ],
       },
       {
-        text: '阶段 00 · 环境准备',
-        items: [{ text: '环境准备', link: '/stages/00-环境准备' }]
-      }
-      // 后续阶段（01–18 + 进阶篇）随撰写补充
-    ]
-  }
+        text: '阶段教程',
+        items: stageItems,
+      },
+    ],
+  },
 })
