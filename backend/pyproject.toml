@@ -16,6 +16,9 @@ dependencies = [
     "fastembed>=0.4,<1",
     # 阶段 08 起：中文分词，给 BM25 关键词检索用（中文没有空格，必须先分词）。
     "jieba>=0.42",
+    # 阶段 18 起：把虚拟屏幕渲染成真实 PNG（Computer Use 的"被操作的那台电脑"）。
+    # 此前 Pillow 只是被 chromadb 间接带进来，我们从这一阶段起**直接依赖**它，故显式声明。
+    "pillow>=10",
 ]
 
 [tool.uv]

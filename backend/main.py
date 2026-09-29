@@ -89,6 +89,11 @@ from schemas import (
     VoiceResponse,
     VoiceTerm,
     VoiceTermCheck,
+    ComputerAction,
+    ComputerElement,
+    ComputerRequest,
+    ComputerResponse,
+    ComputerScreen,
     to_dicts,
 )
 from extract import extract_one
@@ -105,6 +110,7 @@ import search
 import research
 import vision  # noqa: F401  端点函数体里用到；漏了它 import main 照样成功，首次调用才 500
 import voice  # noqa: F401  同上：这行少了，页面点「开始」才会 500
+import computer  # noqa: F401  同上。想确认没漏，跑 _check_globals.py：期望 MISSING: none
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -1242,5 +1248,79 @@ def voice_stream(req: VoiceRequest) -> StreamingResponse:
             yield sse({"type": "error", "message": str(e)})
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"语音管线运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+@app.post("/api/computer/run", response_model=ComputerResponse)
+def computer_run(req: ComputerRequest) -> ComputerResponse:
+    """**非流式**：一次跑完整轮 Computer Use，返回结果 + 两套确定性读数。
+
+    ⚠️ 本阶段的"电脑"是**虚拟的**：所有动作只改内存里的一个 dict，
+    碰不到真实文件系统 / 鼠标 / 网络。沙箱不是可选项 —— 是 Computer Use 的第一原则
+    （官方要求跑在 Docker/VM 里，否则模型能在你本机随便点）。
+    """
+    client = get_client()
+    try:
+        result = computer.run_computer_blocking(
+            client,
+            req.task,
+            order_id=req.orderId,
+            amount=req.amount,
+            date=req.date,
+            model=req.model,
+            temperature=req.temperature,
+            max_steps=req.maxSteps,
+            allow_dangerous=req.allowDangerous,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Computer Use 运行失败：{e}") from e
+    return ComputerResponse(**result)
+
+
+@app.post("/api/computer/stream")
+def computer_stream(req: ComputerRequest) -> StreamingResponse:
+    """**流式**：逐帧推「截图 → 模型说话 → 动作 → 新截图」，前端实时叠出点击落点。
+
+    帧协议（`type` 即帧类型）：
+
+        data: {"type":"start",  "task":"...", "model":"...", "maxSteps":8,
+                               "screen":{"width":1024,"height":768,"elements":[...]},
+                               "expected":{...}, "allowDangerous":false}
+        data: {"type":"screen", "step":0, "image":"data:image/png;base64,...", "state":{...}}
+        data: {"type":"delta",  "step":1, "text":"我先看一下屏幕……"}
+        data: {"type":"action", "step":1, "action":"left_click", "x":360, "y":148,
+                               "ok":true, "target":"field_order", "hit":true, "errorPx":null}
+        data: {"type":"finish", ...完整结果 + 评分 + times/totalMs/llmMs}
+        data: {"type":"error",  "message":"..."}
+
+    ⭐ `action.x/y` 与 `start.screen.elements` 一叠，就能把「模型点在哪」和
+       「按钮真的在哪」画在同一张图上 —— 这是本阶段的签名元素，也是判据的来源。
+
+    ⚠️ 两个协议细节（「核心概念」一节会展开）：
+       1. `role="tool"` 的消息**只能装文本**，装不了图片。所以新截图要另起一条
+          `role="user"` 的多模态消息带上；而每个 tool_call 又**必须**有配对的
+          tool 消息，否则 API 直接报错。两件事都得做。
+       2. `finish` 一定会发（失败时也发，带部分结果）。所以别用"流是否结束"判断成败，
+          要看 `finish.success` / `finish.error`。
+    """
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in computer.run_computer(
+                client,
+                req.task,
+                order_id=req.orderId,
+                amount=req.amount,
+                date=req.date,
+                model=req.model,
+                temperature=req.temperature,
+                max_steps=req.maxSteps,
+                allow_dangerous=req.allowDangerous,
+            ):
+                yield sse(event)
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"Computer Use 运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())

@@ -41,7 +41,7 @@ export const STAGES: StageMeta[] = [
   { id: 15, label: 'Deep Research', path: '/research' },
   { id: 16, label: '多模态·图像', path: '/vision' },
   { id: 17, label: '多模态·语音', path: '/voice' },
-  { id: 18, label: 'Computer Use', path: null },
+  { id: 18, label: 'Computer Use（仿制）', path: '/computer' },
 ]
 
 export function stageById(id: number): StageMeta | undefined {

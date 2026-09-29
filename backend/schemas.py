@@ -1073,3 +1073,118 @@ class VoiceResponse(BaseModel):
     totalMs: float = 0.0
     llmMs: float = 0.0
     error: str | None = None
+
+
+# ---------- 阶段 18 · Computer Use（仿制） ----------
+
+
+class ComputerElement(BaseModel):
+    """虚拟屏幕上的一个元素。
+
+    ⭐ 本阶段最关键的设计：**这块 bbox 就是真值**。
+    被操作的"电脑"是我们自己渲染的，所以每个按钮的中心坐标我们精确知道——
+    于是模型的每一次点击都能被**确定性地**量出偏差，不用问它"你点得准吗"。
+    """
+
+    name: str = Field(description="元素标识，如 field_order / btn_submit")
+    kind: str = Field(default="other", description="text_field / button / label / other")
+    x: int
+    y: int
+    w: int
+    h: int
+    label: str = Field(default="", description="屏幕上显示的文案")
+    dangerous: bool = Field(default=False, description="危险元素：未授权时点击会被拒绝")
+
+
+class ComputerScreen(BaseModel):
+    """虚拟屏幕规格。前端拿它画「点击落点叠加层」。"""
+
+    width: int
+    height: int
+    elements: list[ComputerElement] = Field(default_factory=list)
+
+
+class ComputerAction(BaseModel):
+    """模型发出并被实际执行（或拒绝）的一次动作，附带确定性评分。"""
+
+    step: int
+    action: str = Field(description="screenshot / left_click / type / key / wait")
+    x: int | None = None
+    y: int | None = None
+    text: str | None = None
+    keys: str | None = None
+    ok: bool = Field(default=True, description="是否被接受执行；False 表示非法/被沙箱拒绝")
+    error: str | None = Field(default=None, description="被拒绝的原因（会原样回传给模型）")
+
+    # ---- 定位判据：只有点击动作才有 ----
+    target: str | None = Field(default=None, description="点击**实际**落在了哪个元素上；点在空白处则为 None")
+    hit: bool = Field(default=False, description="是否落在某个元素内（False = 点空了）")
+    errorPx: float | None = Field(
+        default=None,
+        description="仅点空时有值：落点到**最近元素矩形**的像素距离 —— 定位误差的直接读数",
+    )
+    centerOffsetPx: float | None = Field(
+        default=None,
+        description="仅命中时有值：落点到**目标元素中心**的像素距离。命中率高≠点得准 —— 这项才是精度",
+    )
+    lostKeys: bool = Field(
+        default=False,
+        description="这次 type 的按键被丢弃了（前一次点击没落在任何输入框）—— 定位失败最硬的证据",
+    )
+    note: str | None = Field(
+        default=None,
+        description="执行后回传给模型的那句观察结果 —— 前端动作时间线直接显示它，前端不必自己编话术",
+    )
+
+
+class ComputerRequest(BaseModel):
+    """一次 Computer Use 会话的请求。"""
+
+    task: str | None = Field(default=None, description="自然语言任务；留空则用内置模板")
+    orderId: str = Field(default="ORDER-2026-0917", description="期望填进 ORDER ID 的值（ASCII，键盘只能打 ASCII）")
+    amount: str = Field(default="2158.50", description="期望填进 AMOUNT 的值")
+    date: str = Field(default="2026-09-21", description="期望填进 DATE 的值")
+    model: str | None = None
+    temperature: float = 0.2
+    maxSteps: int = Field(default=8, ge=1, le=16)
+    allowDangerous: bool = Field(
+        default=False,
+        description="是否允许点击危险按钮。默认 False —— 沙箱默认拦截，要求人工确认（真实 Computer Use 的安全红线）",
+    )
+
+
+class ComputerResponse(BaseModel):
+    """一次 Computer Use 的完整结果 + 两套确定性读数。"""
+
+    task: str
+    model: str
+    screen: ComputerScreen
+    actions: list[ComputerAction] = Field(default_factory=list)
+    steps: int = Field(default=0, description="实际跑了几轮（不含被拒的动作）")
+
+    # ---- 任务级判据 ----
+    state: dict[str, str] = Field(default_factory=dict, description="虚拟应用最终状态（各字段实际值）")
+    fieldScore: int = Field(default=0, description="填对了几项（0–3）")
+    fieldTotal: int = 3
+    submitted: bool = False
+    success: bool = Field(default=False, description="三项全对 **且** 已提交")
+
+    # ---- 定位判据（本阶段新增的暗线）----
+    clicks: int = Field(default=0, description="点击次数")
+    hitClicks: int = Field(default=0, description="落在某个元素内的点击数")
+    clickHitRate: float = Field(default=0.0, description="点击命中率 —— 有没有点中")
+    avgClickErrorPx: float = Field(default=0.0, description="点空时离最近元素的平均像素距离（全部点中时为 0）")
+    avgCenterOffsetPx: float = Field(
+        default=0.0,
+        description="命中时离目标元素中心的平均像素距离 —— 点得多准；全部点中的运行也有值，可横向比较",
+    )
+    lostKeystrokes: int = Field(
+        default=0,
+        description="键盘被丢弃的次数 —— 模型想打字但前一次点击没点中输入框；定位失败最硬的证据（纯观测，非模型自述）",
+    )
+    transcript: list[str] = Field(default_factory=list, description="模型每一轮的说明文字（它的'自述'）")
+
+    times: dict[str, float] = Field(default_factory=dict)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    error: str | None = None

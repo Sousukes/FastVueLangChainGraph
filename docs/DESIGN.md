@@ -28,7 +28,7 @@
 | 后端 | Python 3.11+，`uv` 管依赖，FastAPI（最新稳定） |
 | LLM 客户端 | 自封装轻量 client（基于 OpenAI SDK，切 `base_url`/`key`） |
 | 默认模型 | **DeepSeek-Flash**（阶段 00–17 统一使用） |
-| 阶段 18 | Computer Use 需 Claude 能力，保留 Claude 为**唯一例外**（方案 A） |
+| 阶段 18 | Computer Use —— 实做改走 **方案 C · DeepSeek 视觉仿制**（变更理由见下） |
 | 前端 | Vite + Vue3 + Pinia + Element Plus |
 | 流式 | 前端原生 `fetch` + `ReadableStream` 解析 SSE |
 | RAG | ChromaDB（本地向量库）+ 本地嵌入（bge / Ollama embeddings） |
@@ -36,6 +36,21 @@
 | 前后端协作 | 阶段 01–02 前端直连 LLM 讲原理；阶段 03 起切 FastAPI 代理 + SSE |
 
 > 具体补丁版本（FastAPI / Vue3 / Element Plus / VitePress / ChromaDB / DeepSeek 模型 id）以**动笔时最新稳定版**为准，不硬编码。
+
+> **⚠️ 变更记录（阶段 18 动笔时改定）**：本节原定「Computer Use 需 Claude 能力，保留 Claude 为唯一例外（方案 A）」。
+> 实做前重新核查后改为 **方案 C · DeepSeek 视觉仿制**，理由：
+> 1. `.env` 里 `CLAUDE_API_KEY` **为空**，且 `CLAUDE_BASE_URL` 指向 Anthropic **原生**端点
+>    （`/v1/messages` + `anthropic-beta` 头 + `x-api-key`），而本项目的 `llm.py` 只会说 OpenAI 协议 ——
+>    走 Claude 等于新增一个 SDK、一个付费 Key、一套 Docker 沙箱；
+> 2. Computer Use 的闭环里**只有「看屏幕并给出动作」这一步**绑定模型厂商，
+>    截图 / 执行 / 回灌三步本课已在阶段 05、10、16 建好；
+> 3. 第 2 步用阶段 16 已验证过的 DeepSeek 视觉即可接上 —— 零新依赖、零新密钥。
+>    **代价是坐标精度**，而精度差恰好是本阶段最好的教材（详见 [`stages/18-ComputerUse.md`](./stages/18-ComputerUse.md) §5）；
+> 4. 「Claude 是唯一例外」在 2026 年已不准确（OpenAI 的 Responses API `computer` 工具、Gemini 的 `computer_use` 都可用），
+>    但对本项目结论不变：它们各自都不在 OpenAI Chat Completions 的形状里。
+
+> **安全红线不变**：真实 Computer Use 必须跑在沙箱里（官方要求 Docker/VM）。本阶段把「被操作的电脑」
+> 做成一屏自渲染的虚拟桌面，所有动作只改内存状态，碰不到真实文件系统/鼠标/网络，危险动作默认被拒。
 
 ## 三、阶段映射总表
 | 阶段 | 内容 | 形态 |
@@ -58,7 +73,7 @@
 | 15 | Deep Research | 主线 |
 | 16 | 多模态·图像 | 主线（能力插件） |
 | 17 | 多模态·语音 | 主线（能力插件） |
-| 18 | Computer Use（Claude 驱动·进阶演示） | 主线 |
+| 18 | Computer Use（仿制：DeepSeek 视觉 + 自渲染虚拟屏幕） | 主线 |
 
 ## 四、单阶段模板（7 段，统一）
 1. 阶段目标

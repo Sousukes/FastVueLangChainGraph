@@ -102,6 +102,12 @@ const routes: RouteRecordRaw[] = [
     meta: { stage: 17 },
   },
   {
+    path: '/computer',
+    name: 'computer',
+    component: () => import('../pages/ComputerPage.vue'),
+    meta: { stage: 18 },
+  },
+  {
     path: '/stage/:id(\\d+)',
     name: 'stage-placeholder',
     component: () => import('../pages/StagePlaceholder.vue'),
