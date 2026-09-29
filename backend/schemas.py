@@ -5,6 +5,7 @@
 阶段 05：函数调用（工具说明书 + 调用 trace）
 阶段 09：GraphRAG（实体 / 边 / 源块 / 三段时间）
 阶段 10：单智能体（工具目录 + 步数预算 + 结构化 trace）
+阶段 11：多智能体（角色工具面 + 任务拓扑分层 + 评审意见）
 """
 
 from __future__ import annotations
@@ -605,4 +606,108 @@ class AgentRunResponse(BaseModel):
     # 就能一眼看出哪些工具被去重挤掉了。
     tools: list[str] = Field(default_factory=list)
     trace: list[AgentStep] = Field(default_factory=list)
+    error: str | None = None
+
+
+# ---------- 阶段 11 · 多智能体 ----------
+
+
+class TeamRoleInfo(BaseModel):
+    """一个专职角色，**关键是 `tools`**。
+
+    ⭐ 分工成不成立，一眼就能从这个字段看出来：如果两个角色的 `tools` 一模一样，
+    它们其实是同一个智能体换了两个名字（"伪多智能体"）。
+    所以工具面必须回传、必须显示。
+    """
+
+    name: str
+    label: str
+    groups: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    maxSteps: int = 1
+    temperature: float = 0.2
+    # 这个角色接哪些 kind 的任务（research / compute）
+    kinds: list[str] = Field(default_factory=list)
+
+
+class TeamRolesResponse(BaseModel):
+    roles: list[TeamRoleInfo] = Field(default_factory=list)
+    kinds: list[str] = Field(default_factory=list)
+
+
+class TeamTask(BaseModel):
+    """Planner 拆出来的一个子任务。
+
+    `dependsOn` 是调度器唯一关心的字段——**它决定了哪些任务能并行**。
+    留空 = 可以立刻开工 = 能吃到并行红利。
+    """
+
+    id: str
+    kind: str
+    description: str = ""
+    dependsOn: list[str] = Field(default_factory=list)
+
+
+class TeamRunRequest(BaseModel):
+    """跑一次多智能体。`parallel` 这个开关是本阶段的核心实验：
+
+    关掉它，所有任务串行执行——**耗时立刻变成并行的数倍**，
+    这是理解"并行红利从哪来"最直接的一次对照。
+    """
+
+    question: str = Field(min_length=1)
+    model: str | None = None
+    parallel: bool = True
+    max_tasks: int = Field(default=4, ge=1, le=6, description="最多拆几个子任务")
+    observation_limit: int = Field(
+        default=1200, ge=200, le=4000, description="单条 Observation 的字符上限"
+    )
+
+
+class TeamTaskResult(BaseModel):
+    """一个子任务的执行结果。"""
+
+    id: str
+    kind: str = ""
+    description: str = ""
+    dependsOn: list[str] = Field(default_factory=list)
+    role: str = ""
+    answer: str | None = None
+    ms: float = 0.0
+    steps: int = 0
+    reason: str | None = None
+    # 这个角色**实际**拿到的工具面——用来验证分工是真的
+    tools: list[str] = Field(default_factory=list)
+
+
+class TeamIssue(BaseModel):
+    """评审员挑出的一条问题。"""
+
+    taskId: str
+    problem: str = ""
+
+
+class TeamRunResponse(BaseModel):
+    """一次完整的多智能体运行。
+
+    ⭐ `planMs` / `reviewMs` / `writeMs` 分开回传，是为了让"钱花在谁身上"可见——
+    本阶段真正要回答的是「多付这几倍时间到底买到了什么」。
+    """
+
+    question: str
+    answer: str | None = None
+    model: str
+    parallel: bool = True
+    tasks: list[TeamTask] = Field(default_factory=list)
+    # 拓扑分层结果：[[t1], [t2,t3], [t4]] —— 同层并行、跨层串行
+    layers: list[list[str]] = Field(default_factory=list)
+    results: list[TeamTaskResult] = Field(default_factory=list)
+    handoffs: list[dict] = Field(default_factory=list)
+    verdict: str | None = None
+    issues: list[TeamIssue] = Field(default_factory=list)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    planMs: float = 0.0
+    reviewMs: float = 0.0
+    writeMs: float = 0.0
     error: str | None = None

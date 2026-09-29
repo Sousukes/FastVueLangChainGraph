@@ -26,7 +26,7 @@ export const STAGES: StageMeta[] = [
   { id: 8, label: 'RAG 进阶', path: '/hybrid' },
   { id: 9, label: 'GraphRAG 知识图谱', path: '/graph' },
   { id: 10, label: '单智能体', path: '/agent' },
-  { id: 11, label: '多智能体', path: null },
+  { id: 11, label: '多智能体', path: '/team' },
   { id: 12, label: 'Agent Harness', path: null },
   { id: 13, label: 'Agentic RAG', path: null },
   { id: 14, label: 'AI 搜索应用', path: null },

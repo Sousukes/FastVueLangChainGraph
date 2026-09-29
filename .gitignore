@@ -12,6 +12,8 @@ dist/
 # Vite / VitePress 在改配置时会写这种临时文件。
 # 写全名匹配不到 docs/.vitepress/config.ts.timestamp-*.mjs，所以按后缀匹配。
 *.timestamp-*.mjs
+# VitePress 构建缓存（下次 build 加速用，不入仓）
+docs/.vitepress/cache/
 
 # 阶段 07 起：ChromaDB 的本地落盘目录（删掉它就等于清空知识库）
 .chroma/

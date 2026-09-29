@@ -493,8 +493,14 @@ def run_react(
     groups: Iterable[str] = DEFAULT_GROUPS,
     observation_limit: int = 1200,
     max_repeat: int = 2,
+    system: str | None = None,
 ) -> Iterable[dict]:
     """跑一个完整的 ReAct 循环，**逐事件 yield**。
+
+    `system` 是阶段 11 加的：多智能体里每个角色要有**自己的**系统提示词。
+    （不传就用 REACT_SYSTEM，单智能体的行为完全不变。）
+    顺带说一句：光换提示词不构成"分工"——**工具面（groups）也必须不同**，
+    否则只是同一个智能体换了个名字跑好几遍。详见 team.py。
 
     写成生成器是刻意的：ReAct 的演示价值全在"看着它想"。
     路由层把它直接接进 SSE，每一帧就是时间线上的一行。
@@ -525,7 +531,7 @@ def run_react(
     }
 
     messages: list[dict] = [
-        {"role": "system", "content": REACT_SYSTEM},
+        {"role": "system", "content": system or REACT_SYSTEM},
         {"role": "user", "content": question},
     ]
     steps: list[dict] = []

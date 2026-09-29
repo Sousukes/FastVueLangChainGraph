@@ -17,6 +17,7 @@ Deep Research、多模态到 Computer Use。
 - 🎯 [阶段 08 · RAG 进阶（混合检索 / 重排）](/stages/08-RAG进阶)
 - 🕸️ [阶段 09 · GraphRAG 知识图谱](/stages/09-GraphRAG)
 - 🤖 [阶段 10 · 单智能体（ReAct）](/stages/10-单智能体)
+- 👥 [阶段 11 · 多智能体（Multi-agent）](/stages/11-多智能体)
 
 ## 课程资料
 

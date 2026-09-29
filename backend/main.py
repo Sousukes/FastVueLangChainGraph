@@ -63,6 +63,9 @@ from schemas import (
     RagSearchResponse,
     RagSeedResponse,
     RagStatus,
+    TeamRolesResponse,
+    TeamRunRequest,
+    TeamRunResponse,
     ToolInfo,
     ToolRunRequest,
     ToolRunResponse,
@@ -75,6 +78,7 @@ from mcpkit.host import get_host
 import rag
 import graph
 import react
+import team
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -623,5 +627,87 @@ def agent_stream(req: AgentRunRequest) -> StreamingResponse:
                 yield sse(event)
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"智能体运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 11 · 多智能体 ----------
+
+
+@app.get("/api/team/roles", response_model=TeamRolesResponse)
+def team_roles() -> TeamRolesResponse:
+    """角色目录：把每个角色的**工具面**摊开给前端看。
+
+    ⭐ `tools` 必须显示。分工成不成立，一眼就能从这个清单看出来——
+    如果两个角色的 tools 一模一样，那就是"伪多智能体"（同一个智能体换两个名字）。
+    """
+    return TeamRolesResponse(**team.role_catalog())
+
+
+@app.post("/api/team/run", response_model=TeamRunResponse)
+def team_run(req: TeamRunRequest) -> TeamRunResponse:
+    """非流式：跑完整个多智能体流程，一次性返回结果 + 分角色计时。
+
+    和 `/stream` 结果完全一致，只是要等最后才给你看——适合对照实验
+    （同一个问题跑两遍，并排看单智能体 vs 多智能体的耗时与答案）。
+    """
+    client = get_client()
+    try:
+        result = team.run_team_blocking(
+            client,
+            req.question,
+            model=req.model,
+            parallel=req.parallel,
+            max_tasks=req.max_tasks,
+            observation_limit=req.observation_limit,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"多智能体运行失败：{e}") from e
+    # `events` 是给 /stream 用的中间帧，阻塞接口不需要，去掉避免超 schema
+    return TeamRunResponse(**{k: v for k, v in result.items() if k != "events"})
+
+
+@app.post("/api/team/stream")
+def team_stream(req: TeamRunRequest) -> StreamingResponse:
+    """**流式**：逐事件推。多智能体相对单智能体多了一个 `agent` 字段，
+
+    并行时必须有它，否则前端没法把交织的事件分回各自的角色列。
+
+    帧协议（事件类型即帧的 `type`，每一帧都带 `agent` 表示归属角色）：
+        data: {"type":"start",        "roles":[...], "parallel":true}
+        data: {"type":"phase",        "phase":"plan", "label":"规划员拆解任务"}
+        data: {"type":"plan",         "tasks":[...], "layers":[[...]], "ms":..}
+        data: {"type":"layer",        "layer":1, "agents":[...]}
+        data: {"type":"agent_start",  "agent":"t1", "role":"researcher",
+               "groups":["rag","graph"], "tools":["rag_search",...]}
+        data: {"type":"delta",        "agent":"t1", "step":1, "text":"..."}
+        data: {"type":"action",       "agent":"t1", "step":1, "tool":"rag_search", ...}
+        data: {"type":"observation",  "agent":"t1", ...}
+        data: {"type":"agent_result", "agent":"t1", "result":{...}}
+        data: {"type":"agent_end",    "agent":"t1"}
+        data: {"type":"review",       "verdict":"pass", "issues":[...]}
+        data: {"type":"write",        "text":"..."}
+        data: {"type":"finish",       "answer":"...", "totalMs":.., "planMs":.., ...}
+        data: {"type":"error",        "message":"..."}
+
+    ⭐ 和阶段 09 对照：这里的并行**也是**「后台线程 + queue.Queue + 哨兵」，
+    因为多个 worker 天然并发、谁先出帧不确定。阶段 10 的「能自己拆开就别用线程」
+    在这里**反例成立**——判据是"流程本身是否并发"，不是"能不能用生成器拆开"。
+    """
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in team.run_team(
+                client,
+                req.question,
+                model=req.model,
+                parallel=req.parallel,
+                max_tasks=req.max_tasks,
+                observation_limit=req.observation_limit,
+            ):
+                yield sse(event)
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"多智能体运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
