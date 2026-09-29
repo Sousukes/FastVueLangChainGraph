@@ -711,3 +711,59 @@ class TeamRunResponse(BaseModel):
     reviewMs: float = 0.0
     writeMs: float = 0.0
     error: str | None = None
+
+
+# ---------- 阶段 12 · Agent Harness 框架 ----------
+
+
+class HarnessRoleInfo(BaseModel):
+    """harness 暴露的「一个可独立运行的角色」。
+
+    和阶段 11 的 TeamRoleInfo 同构——因为多智能体的角色本就是 harness.Agent 的实例。
+    这里再给一份，是让「选一个角色单独跑」的控制台有数据可绑，也顺手把
+    `tools` 字段亮出来（分工成不成立，一眼看工具面）。
+    """
+
+    name: str
+    label: str
+    groups: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    maxSteps: int = 6
+    temperature: float = 0.2
+    description: str = ""
+
+
+class HarnessRolesResponse(BaseModel):
+    roles: list[HarnessRoleInfo] = Field(default_factory=list)
+    groups: list[str] = Field(default_factory=list)
+
+
+class HarnessRunRequest(BaseModel):
+    """跑一个独立的 harness Agent（单角色）。
+
+    这既是教学控制台的后端，也是「harness 真能复用」的最小证明：
+    多智能体里的检索员，和这里单独跑的检索员，是同一段 Agent 代码，
+    区别只在构造参数。
+    """
+
+    role: str = Field(min_length=1, description="预设角色名：researcher / analyst / pure")
+    question: str = Field(min_length=1)
+    model: str | None = None
+    maxSteps: int = Field(default=6, ge=1, le=12)
+    temperature: float = 0.2
+    observationLimit: int = Field(default=1200, ge=200, le=4000)
+
+
+class HarnessRunResponse(BaseModel):
+    """单次 harness 运行的结果（与 TeamTaskResult 同构，统一前端渲染）。"""
+
+    role: str
+    question: str
+    answer: str | None = None
+    model: str
+    steps: int = 0
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    tools: list[str] = Field(default_factory=list)
+    trace: list[dict] = Field(default_factory=list)
+    error: str | None = None

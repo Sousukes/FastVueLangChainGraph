@@ -79,6 +79,7 @@ import rag
 import graph
 import react
 import team
+import harness
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -709,5 +710,93 @@ def team_stream(req: TeamRunRequest) -> StreamingResponse:
                 yield sse(event)
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"多智能体运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 12 · Agent Harness 框架 ----------
+
+
+@app.get("/api/harness/roles", response_model=HarnessRolesResponse)
+def harness_roles() -> HarnessRolesResponse:
+    """角色目录 + 可用工具组。
+
+    ⭐ 这份目录和阶段 11 的 `/api/team/roles` 同构——因为多智能体的角色、
+    这里单独跑的角色，背后是**同一个 harness.Agent**。区别只是构造参数。
+    """
+    return HarnessRolesResponse(**harness.role_catalog())
+
+
+@app.post("/api/harness/run", response_model=HarnessRunResponse)
+def harness_run(req: HarnessRunRequest) -> HarnessRunResponse:
+    """非流式：跑一个独立的 harness Agent，返回结果 + 结构化 trace。
+
+    这是「harness 真能复用」的最小证明：选一个预设角色（检索员 / 分析员 / 纯净助手），
+    它和阶段 11 里同名的 worker 跑的是同一段 Agent 代码。
+    """
+    client = get_client()
+    preset = harness.PRESETS.get(req.role)
+    if preset is None:
+        raise HTTPException(status_code=404, detail=f"未知角色：{req.role}")
+    try:
+        result = harness.Agent(
+            client,
+            system=preset["system"],
+            groups=preset["groups"],
+            max_steps=req.maxSteps,
+            temperature=req.temperature,
+            observation_limit=req.observationLimit,
+        ).run_blocking(req.question, model=req.model)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"harness 运行失败：{e}") from e
+    return HarnessRunResponse(
+        role=req.role,
+        question=req.question,
+        answer=result.get("answer"),
+        model=result.get("model", client.model),
+        steps=result.get("steps", 0),
+        totalMs=result.get("totalMs", 0.0),
+        llmMs=result.get("llmMs", 0.0),
+        tools=result.get("tools", []),
+        trace=result.get("trace", []),
+        error=result.get("error"),
+    )
+
+
+@app.post("/api/harness/stream")
+def harness_stream(req: HarnessRunRequest) -> StreamingResponse:
+    """**流式**：逐事件推。每一帧带 `agent` 字段（值为角色名），前端据此分列。
+
+    帧协议（事件类型即帧的 `type`）：
+        data: {"type":"start", "question":"...", "tools":[...], "maxSteps":..}
+        data: {"type":"delta", "step":1, "text":"..."}
+        data: {"type":"action", "step":1, "tool":"rag_search", "arguments":{...}}
+        data: {"type":"observation", "step":1, "callId":"...", "ok":true, "content":"..."}
+        data: {"type":"step_end", "step":1, "actions":[...]}
+        data: {"type":"finish", "answer":"...", "totalMs":.., "llmMs":.., "steps":..}
+        data: {"type":"error", "message":"..."}
+    """
+    client = get_client()
+    preset = harness.PRESETS.get(req.role)
+    if preset is None:
+        return StreamingResponse(
+            (sse({"type": "error", "message": f"未知角色：{req.role}"}),),
+            media_type="text/event-stream",
+            headers=sse_headers(),
+        )
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in harness.Agent(
+                client,
+                system=preset["system"],
+                groups=preset["groups"],
+                max_steps=req.maxSteps,
+                temperature=req.temperature,
+                observation_limit=req.observationLimit,
+            ).run(req.question, model=req.model):
+                yield sse({**event, "agent": req.role})
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"harness 运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())

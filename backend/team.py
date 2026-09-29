@@ -58,6 +58,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -69,6 +70,11 @@ from pydantic import BaseModel, Field, ValidationError
 
 import react
 from react import GROUP_GRAPH, GROUP_LOCAL, GROUP_RAG
+
+# 阶段 12：worker 的循环统一交给 harness.Agent 跑（单一真相源，见 harness.py）
+from harness import Agent
+
+logger = logging.getLogger(__name__)
 
 # ---------- 角色 ----------
 
@@ -563,18 +569,24 @@ def run_team(
                 try:
                     # worker 内部的 ReAct 事件也要转发出来（"把黑盒拆开"是全程原则）
                     role = ROLES[KIND_ROLE.get(task.kind, ROLE_RESEARCHER)]
-                    for ev in react.run_react(
+                    for ev in Agent(
                         client,
-                        _worker_prompt(task, deps),
-                        model=model,
+                        system=role.system,
+                        groups=role.groups,
                         max_steps=role.max_steps,
                         temperature=role.temperature,
-                        groups=role.groups,
-                        system=role.system,
                         observation_limit=observation_limit,
-                    ):
+                    ).run(_worker_prompt(task, deps), model=model):
                         q.put((task.id, ev))
                 except Exception as e:  # noqa: BLE001
+                    # ⚠️ 这里必须是宽捕获：worker 跑在线程池里，异常不接住会让整个
+                    # ThreadPoolExecutor 静默丢结果。但**宽捕获不等于静默**——
+                    # 阶段 12 出过一次真实事故：`observation_limit` 误当 run() 的 kwarg，
+                    # TypeError 被这里吞成一条普通 error 事件，worker 全部空转却看不出原因。
+                    # 所以除了把消息转给用户，还要把堆栈打到日志，保证下次能一眼定位。
+                    # 把异常本身也写进 msg：没有配置 handler 时 logging 走 lastResort，
+                    # 只打印 msg、不带堆栈——至少保证原因不会丢。
+                    logger.exception("worker %s 执行失败：%s", task.id, e)
                     q.put((task.id, {"type": "error", "message": f"{task.id} 执行失败：{e}"}))
                 finally:
                     q.put((task.id, _SENTINEL))
@@ -602,16 +614,14 @@ def run_team(
             # （agent_start 已经在上面统一发过了）
             for task, deps in ready:
                 role = ROLES[KIND_ROLE.get(task.kind, ROLE_RESEARCHER)]
-                for ev in react.run_react(
+                for ev in Agent(
                     client,
-                    _worker_prompt(task, deps),
-                    model=model,
+                    system=role.system,
+                    groups=role.groups,
                     max_steps=role.max_steps,
                     temperature=role.temperature,
-                    groups=role.groups,
-                    system=role.system,
                     observation_limit=observation_limit,
-                ):
+                ).run(_worker_prompt(task, deps), model=model):
                     _feed_evidence(evidence[task.id], ev)
                     ev = _normalize_worker_event(ev)
                     if ev is None:

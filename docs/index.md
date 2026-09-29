@@ -18,6 +18,7 @@ Deep Research、多模态到 Computer Use。
 - 🕸️ [阶段 09 · GraphRAG 知识图谱](/stages/09-GraphRAG)
 - 🤖 [阶段 10 · 单智能体（ReAct）](/stages/10-单智能体)
 - 👥 [阶段 11 · 多智能体（Multi-agent）](/stages/11-多智能体)
+- 🧩 [阶段 12 · Agent Harness 框架](/stages/12-AgentHarness)
 
 ## 课程资料
 

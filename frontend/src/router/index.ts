@@ -66,6 +66,12 @@ const routes: RouteRecordRaw[] = [
     meta: { stage: 11 },
   },
   {
+    path: '/harness',
+    name: 'harness',
+    component: () => import('../pages/HarnessPage.vue'),
+    meta: { stage: 12 },
+  },
+  {
     path: '/stage/:id(\\d+)',
     name: 'stage-placeholder',
     component: () => import('../pages/StagePlaceholder.vue'),
