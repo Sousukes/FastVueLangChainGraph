@@ -36,6 +36,8 @@ from schemas import (
     AgenticChannelsResponse,
     AgenticRunRequest,
     AgenticRunResponse,
+    SearchRequest,
+    SearchResponse,
     ChatRequest,
     ChatResponse,
     ExtractRequest,
@@ -87,6 +89,7 @@ import react
 import team
 import harness
 import agentic
+import search
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -897,5 +900,80 @@ def agentic_stream(req: AgenticRunRequest) -> StreamingResponse:
                 yield sse(event)
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"Agentic RAG 运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 14 · AI 搜索应用 ----------
+
+
+@app.post("/api/search/run", response_model=SearchResponse)
+def search_run(req: SearchRequest) -> SearchResponse:
+    """非流式：跑完「混合检索 → 带引用合成 → 引用解析」。
+
+    `sources` 是答案的"依据面板"——`cited=true` 的条目就是答案里 [n] 实际指向的来源；
+    `grounded` 表示答案**声称**至少引用了一段资料（不保证忠实，见阶段 15）。
+    """
+    client = get_client()
+    try:
+        result = search.run_search_blocking(
+            client,
+            req.question,
+            model=req.model,
+            top_k=req.topK,
+            rerank=req.rerank,
+            snippet=req.snippet,
+            temperature=req.temperature,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"AI 搜索运行失败：{e}") from e
+
+    return SearchResponse(
+        question=result["question"],
+        answer=result.get("answer"),
+        model=result.get("model", client.model),
+        sources=result.get("sources", []),
+        citations=result.get("citations", []),
+        grounded=result.get("grounded", False),
+        coverage=result.get("coverage", 0.0),
+        retrieved=result.get("retrieved", 0),
+        times=result.get("times", {}),
+        totalMs=result.get("totalMs", 0.0),
+        llmMs=result.get("llmMs", 0.0),
+        error=result.get("error"),
+    )
+
+
+@app.post("/api/search/stream")
+def search_stream(req: SearchRequest) -> StreamingResponse:
+    """**流式**：逐事件推，前端据此渲染答案 + 来源面板。
+
+    帧协议（`type` 即帧类型）：
+
+        data: {"type":"start",     "question":"...", "topK":6}
+        data: {"type":"retrieve",  "query":"...", "hits":[...], "count":6, "ms":..}
+        data: {"type":"synthesize","status":"ok"}
+        data: {"type":"answer_delta", "text":"..."}
+        data: {"type":"finish",    "answer":"...", "sources":[...], "citations":[1,3], "grounded":true, "coverage":0.6, "times":{...}}
+        data: {"type":"error",     "message":"..."}
+
+    ⭐ `finish.sources` 里每条带 `cited` 字段，前端据此把答案里的 [n] 标成可点击的引用 chip。
+    """
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in search.run_search(
+                client,
+                req.question,
+                model=req.model,
+                top_k=req.topK,
+                rerank=req.rerank,
+                snippet=req.snippet,
+                temperature=req.temperature,
+            ):
+                yield sse(event)
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"AI 搜索运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())

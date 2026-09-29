@@ -37,7 +37,7 @@ export const STAGES: StageMeta[] = [
   { id: 11, label: '多智能体', path: '/team' },
   { id: 12, label: 'Agent Harness', path: '/harness' },
   { id: 13, label: 'Agentic RAG', path: '/agentic' },
-  { id: 14, label: 'AI 搜索应用', path: null },
+  { id: 14, label: 'AI 搜索应用', path: '/search' },
   { id: 15, label: 'Deep Research', path: null },
   { id: 16, label: '多模态·图像', path: null },
   { id: 17, label: '多模态·语音', path: null },

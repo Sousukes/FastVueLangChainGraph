@@ -822,3 +822,51 @@ class AgenticRunResponse(BaseModel):
     llmMs: float = 0.0
     timeline: dict[str, list[dict]] = Field(default_factory=dict)
     error: str | None = None
+
+
+class SearchRequest(BaseModel):
+    """跑一次 AI 搜索（混合检索 + 带引用答案）。
+
+    与阶段 13 不同，这里**不**暴露检索方式——固定走阶段 08 的混合检索 + 重排，
+    因为搜索产品要的是「快而准」的即时响应，多轮决策回路反而是负担（见 search.py 顶部说明）。
+    """
+
+    question: str = Field(min_length=1)
+    model: str | None = None
+    topK: int = Field(default=6, ge=1, le=10, description="检索返回的候选片段数（即来源面板条数）")
+    rerank: bool = Field(default=True, description="是否对混合检索结果做 Cross-encoder 重排")
+    snippet: int = Field(default=220, ge=60, le=600, description="来源面板里每段预览截断的字符数")
+    temperature: float = 0.3
+
+
+class SearchSource(BaseModel):
+    """答案里的一条来源（检索命中的一段），带「是否被引用」标记。
+
+    `cited` 是本阶段的关键字段：它把「模型**声称**引用了」这件事**如实**标出来，
+    但不保证忠实——忠实性留给阶段 15 Deep Research。
+    """
+
+    rank: int
+    index: int
+    title: str
+    snippet: str
+    score: float | None = None
+    rerankScore: float | None = None
+    cited: bool = False
+
+
+class SearchResponse(BaseModel):
+    """AI 搜索的完整结果：带引用的答案 + 可核对的来源面板。"""
+
+    question: str
+    answer: str | None = None
+    model: str
+    sources: list[SearchSource] = Field(default_factory=list)
+    citations: list[int] = Field(default_factory=list, description="答案中实际出现的引用编号（已校验、去重、按序）")
+    grounded: bool = False
+    coverage: float = 0.0
+    retrieved: int = 0
+    times: dict[str, float] = Field(default_factory=dict)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    error: str | None = None

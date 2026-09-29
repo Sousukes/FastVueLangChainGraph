@@ -20,6 +20,7 @@ Deep Research、多模态到 Computer Use。
 - 👥 [阶段 11 · 多智能体（Multi-agent）](/stages/11-多智能体)
 - 🧩 [阶段 12 · Agent Harness 框架](/stages/12-AgentHarness)
 - 🔍 [阶段 13 · Agentic RAG](/stages/13-AgenticRAG)
+- 🔎 [阶段 14 · AI 搜索应用](/stages/14-AISearch)
 
 ## 课程资料
 
