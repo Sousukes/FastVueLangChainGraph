@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 Role = Literal["system", "user", "assistant"]
 
@@ -993,6 +993,82 @@ class VisionResponse(BaseModel):
     fields: list[VisionField] = Field(default_factory=list)
     extracted: bool = Field(default=False, description="extract 模式下是否成功解析出结构化字段")
     image: VisionImageMeta | None = None
+    times: dict[str, float] = Field(default_factory=dict)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    error: str | None = None
+
+
+# ---------- 阶段 17 · 多模态·语音 ----------
+
+
+class VoiceRequest(BaseModel):
+    """跑一次语音问答的**文本侧编排**。
+
+    ⚠️ 本阶段的关键边界（实测得出）：DeepSeek **没有**音频接口——
+    `/audio/transcriptions`（语音转写）与 `/audio/speech`（语音合成）都返回 **404**。
+    所以**音频的采集与播放由浏览器承担**（Web Speech API：`SpeechRecognition` 转写、
+    `speechSynthesis` 朗读）。服务端拿到时**已经是文本**，它负责两件真正值得 LLM 做的事：
+
+      ① **口语化改写**：把书面语改成**适合朗读**的短句，并去掉一切 Markdown 标记；
+      ② **朗读稿规范化**（Text Normalization，TTS 前的真实环节）：把 `2026-09-21`、
+         `¥2,158.50`、`USB-C` 这类**符号写法**改成「读出来的样子」。
+
+    外加一件**确定性**的事：体检口语稿里残留了多少 Markdown 标记、朗读大约要几秒。
+    """
+
+    transcript: str = Field(min_length=1, description="ASR 转写文本（或用户直接输入的提问）")
+    model: str | None = None
+    style: Literal["brief", "explain", "step"] = Field(
+        default="brief", description="口语风格：brief 简洁 / explain 展开 / step 分步口述"
+    )
+    maxChars: int = Field(default=220, ge=40, le=600, description="口语稿目标字数上限")
+    temperature: float = 0.3
+
+
+class VoiceTerm(BaseModel):
+    """朗读稿规范化的一条对照：`2026-09-21` → `二零二六年九月二十一日`。
+
+    ⚠️ 字段名用 `from_` + 别名 `"from"`：`from` 是 Python 关键字，不能直接当字段名。
+    `populate_by_name=True` 让它既吃模型返回的 `{"from": ...}`，也能用字段名构造。
+    FastAPI 的 `response_model_by_alias` **默认为 True**，所以响应 JSON 里仍是 `"from"`。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str = ""
+
+
+class VoiceTermCheck(BaseModel):
+    """对 `terms` 的**确定性核对**结果（把「模型自述」降级为「可核对」）。
+
+    为什么需要它：`terms` 是模型的自述，**不是 diff**。实测抓到过——改写阶段自己就把
+    `2026-09-17` 写成了汉字，于是规范化阶段只改了 `BX → B X`，对照表看起来像
+    「数字没被动过」。这里的 `suspect` 就是那些「自述了、但对不上文本」的条目：
+
+        阶段 14 `grounded`  声称引用了吗 → 阶段 15 `faithful` 声称被支持吗
+        → 阶段 17 `termCheck` 自述的改写真的发生了吗
+    """
+
+    total: int = 0
+    verified: int = Field(default=0, description="from 出现在口语稿、且 to 出现在朗读稿的条目数")
+    suspect: list[VoiceTerm] = Field(default_factory=list, description="核对不上的条目（原样带回）")
+
+
+class VoiceResponse(BaseModel):
+    """语音问答的完整结果：转写原文 + 口语稿 + 朗读稿 + 规范化对照 + 体检数字。"""
+
+    transcript: str
+    answer: str | None = Field(default=None, description="口语化改写稿（无 Markdown、短句）")
+    speak: str | None = Field(default=None, description="朗读稿（已做文本规范化，可直接交给 TTS）")
+    terms: list[VoiceTerm] = Field(default_factory=list, description="文本规范化对照表")
+    termCheck: VoiceTermCheck | None = Field(default=None, description="对 terms 的确定性核对结果")
+    style: str = "brief"
+    model: str
+    markdownLeft: int = Field(default=0, description="口语稿里残留的 Markdown 标记数（确定性体检）")
+    plainChars: int = Field(default=0, description="朗读稿的有效字数（中日韩字符数 + 拉丁词数）")
+    estSeconds: float = Field(default=0.0, description="估算朗读时长（中文 4.5 字/秒 + 英文 2.5 词/秒）")
     times: dict[str, float] = Field(default_factory=dict)
     totalMs: float = 0.0
     llmMs: float = 0.0

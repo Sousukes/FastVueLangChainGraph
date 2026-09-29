@@ -40,7 +40,7 @@ export const STAGES: StageMeta[] = [
   { id: 14, label: 'AI 搜索应用', path: '/search' },
   { id: 15, label: 'Deep Research', path: '/research' },
   { id: 16, label: '多模态·图像', path: '/vision' },
-  { id: 17, label: '多模态·语音', path: null },
+  { id: 17, label: '多模态·语音', path: '/voice' },
   { id: 18, label: 'Computer Use', path: null },
 ]
 

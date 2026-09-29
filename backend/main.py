@@ -85,6 +85,10 @@ from schemas import (
     VisionImageMeta,
     VisionRequest,
     VisionResponse,
+    VoiceRequest,
+    VoiceResponse,
+    VoiceTerm,
+    VoiceTermCheck,
     to_dicts,
 )
 from extract import extract_one
@@ -100,6 +104,7 @@ import agentic
 import search
 import research
 import vision  # noqa: F401  端点函数体里用到；漏了它 import main 照样成功，首次调用才 500
+import voice  # noqa: F401  同上：这行少了，页面点「开始」才会 500
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -1164,5 +1169,78 @@ def vision_stream(req: VisionRequest) -> StreamingResponse:
             yield sse({"type": "error", "message": str(e)})
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"图像理解运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 17 · 多模态·语音 ----------
+
+
+@app.post("/api/voice/run", response_model=VoiceResponse)
+def voice_run(req: VoiceRequest) -> VoiceResponse:
+    """**非流式**：一次跑完「口语化改写 → 朗读稿规范化 → 体检」，返回完整结果。
+
+    ⚠️ 注意本阶段**不收音频**：DeepSeek 没有音频接口（实测 `/audio/*` 一律 404），
+    所以 ASR/TTS 由浏览器用 Web Speech API 承担，请求体里进来的是**转写后的文本**。
+    """
+    client = get_client()
+    try:
+        result = voice.run_voice_blocking(
+            client,
+            req.transcript,
+            model=req.model,
+            style=req.style,
+            max_chars=req.maxChars,
+            temperature=req.temperature,
+        )
+    except voice.VoiceInputError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"语音管线运行失败：{e}") from e
+    return VoiceResponse(**result)
+
+
+@app.post("/api/voice/stream")
+def voice_stream(req: VoiceRequest) -> StreamingResponse:
+    """**流式**：逐事件推，前端据此「边想边念」——改写一吐字，就能提前送进 TTS。
+
+    帧协议（`type` 即帧类型）：
+
+        data: {"type":"start",        "transcript":"...", "style":"brief", "model":"...", "maxChars":220}
+        data: {"type":"answer_delta", "text":"..."}
+        data: {"type":"rewrite",      "chars":123, "markdownLeft":0, "ms":1234.5}
+        data: {"type":"speak",        "speak":"...", "terms":[{"from":"USB-C","to":"U S B C"}],
+                                       "termCheck":{"total":1,"verified":1,"suspect":[]},
+                                       "plainChars":110, "estSeconds":24.4, "ms":890.1}
+        data: {"type":"finish",       ...完整结果 + times/totalMs/llmMs}
+        data: {"type":"error",        "message":"..."}
+
+    ⭐ 两处**确定性**体检，都不是模型的自我评价：
+       `rewrite.markdownLeft` 是一条正则数出来的残留标记数；
+       `speak.termCheck` 逐条核对模型自述的对照表（from 在口语稿里、to 在朗读稿里）。
+    """
+    # 先校验（空 / 超长直接 400），再开流；否则错误只能以帧的形式迟到
+    try:
+        voice._check_transcript(req.transcript)
+    except voice.VoiceInputError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in voice.run_voice(
+                client,
+                req.transcript,
+                model=req.model,
+                style=req.style,
+                max_chars=req.maxChars,
+                temperature=req.temperature,
+            ):
+                yield sse(event)
+        except voice.VoiceInputError as e:
+            yield sse({"type": "error", "message": str(e)})
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"语音管线运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
