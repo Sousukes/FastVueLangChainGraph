@@ -767,3 +767,58 @@ class HarnessRunResponse(BaseModel):
     tools: list[str] = Field(default_factory=list)
     trace: list[dict] = Field(default_factory=list)
     error: str | None = None
+
+
+# ---------- 阶段 13 · Agentic RAG ----------
+
+
+class AgenticChannelInfo(BaseModel):
+    """一条可按轮次升级的检索通道。
+
+    关键是 `round` 与 `why`：把「为什么会有下一轮」讲明白，用户才能预判
+    自己在第几轮会看到什么，而不是遇到一个黑盒重试。
+    """
+
+    name: str
+    label: str
+    why: str = ""
+    round: int = 1
+
+
+class AgenticChannelsResponse(BaseModel):
+    channels: list[AgenticChannelInfo] = Field(default_factory=list)
+
+
+class AgenticRunRequest(BaseModel):
+    """跑一次 Agentic RAG。
+
+    注意这里**没有** `top_k` 之外的检索参数——检索方式由轮次决定（见 agentic.CHANNELS），
+    不由调用方指定。这是有意的：**"该不该换个检索法"正是本阶段要交给智能体判断的事**。
+    """
+
+    question: str = Field(min_length=1)
+    model: str | None = None
+    maxRounds: int = Field(default=3, ge=1, le=3, description="最多几轮检索（每轮换一个通道）")
+    topK: int = Field(default=3, ge=1, le=10)
+    hops: int = Field(default=2, ge=1, le=3, description="图谱通道的扩展跳数")
+    gradeLimit: int = Field(default=400, ge=100, le=1200, description="评级时每段截断的字符数")
+    temperature: float = 0.2
+
+
+class AgenticRunResponse(BaseModel):
+    """Agentic RAG 的完整结果，带**全过程时间线**（前端据此渲染决策链路）。"""
+
+    question: str
+    answer: str | None = None
+    model: str
+    needRetrieval: bool | None = None
+    routeReason: str = ""
+    rounds: int = 0
+    finalQuery: str = ""
+    basedOn: str = "none"
+    hits: list[dict] = Field(default_factory=list)
+    times: dict[str, float] = Field(default_factory=dict)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    timeline: dict[str, list[dict]] = Field(default_factory=dict)
+    error: str | None = None

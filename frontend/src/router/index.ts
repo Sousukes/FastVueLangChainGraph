@@ -72,6 +72,12 @@ const routes: RouteRecordRaw[] = [
     meta: { stage: 12 },
   },
   {
+    path: '/agentic',
+    name: 'agentic',
+    component: () => import('../pages/AgenticPage.vue'),
+    meta: { stage: 13 },
+  },
+  {
     path: '/stage/:id(\\d+)',
     name: 'stage-placeholder',
     component: () => import('../pages/StagePlaceholder.vue'),

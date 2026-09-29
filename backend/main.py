@@ -33,6 +33,9 @@ from schemas import (
     AgentRunRequest,
     AgentRunResponse,
     AgentToolsResponse,
+    AgenticChannelsResponse,
+    AgenticRunRequest,
+    AgenticRunResponse,
     ChatRequest,
     ChatResponse,
     ExtractRequest,
@@ -48,6 +51,9 @@ from schemas import (
     GraphSearchRequest,
     GraphSearchResponse,
     GraphStats,
+    HarnessRolesResponse,
+    HarnessRunRequest,
+    HarnessRunResponse,
     MCPCatalog,
     MCPPromptRequest,
     MCPResourceContent,
@@ -80,6 +86,7 @@ import graph
 import react
 import team
 import harness
+import agentic
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -798,5 +805,97 @@ def harness_stream(req: HarnessRunRequest) -> StreamingResponse:
                 yield sse({**event, "agent": req.role})
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"harness 运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 13 · Agentic RAG ----------
+
+
+@app.get("/api/agentic/channels", response_model=AgenticChannelsResponse)
+def agentic_channels() -> AgenticChannelsResponse:
+    """检索通道清单 + 每个通道出现在第几轮。
+
+    把这个端点单独开出来（而不是写死在前端），是为了让「三轮分别用哪种检索」
+    这件事有唯一事实来源——`agentic.CHANNELS` 改了，控制台的计划说明同步变。
+    """
+    return AgenticChannelsResponse(**agentic.channel_catalog())
+
+
+@app.post("/api/agentic/run", response_model=AgenticRunResponse)
+def agentic_run(req: AgenticRunRequest) -> AgenticRunResponse:
+    """非流式：跑完整个「路由 → 检索 → 评级 →（改写重试）→ 生成」。
+
+    `timeline` 把 retrieve / grade / rewrite 三类事件分好组返回——后台到底做了几次决策、
+    每次为什么，都在这份结构里，不必去看日志。
+    """
+    client = get_client()
+    try:
+        result = agentic.run_agentic_blocking(
+            client,
+            req.question,
+            model=req.model,
+            max_rounds=req.maxRounds,
+            top_k=req.topK,
+            hops=req.hops,
+            grade_limit=req.gradeLimit,
+            temperature=req.temperature,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Agentic RAG 运行失败：{e}") from e
+
+    return AgenticRunResponse(
+        question=result["question"],
+        answer=result.get("answer"),
+        model=result.get("model", client.model),
+        needRetrieval=result.get("needRetrieval"),
+        routeReason=result.get("routeReason", ""),
+        rounds=result.get("rounds", 0),
+        finalQuery=result.get("finalQuery", req.question),
+        basedOn=result.get("basedOn", "none"),
+        hits=result.get("hits", []),
+        times=result.get("times", {}),
+        totalMs=result.get("totalMs", 0.0),
+        llmMs=result.get("llmMs", 0.0),
+        timeline=result.get("timeline", {}),
+        error=result.get("error"),
+    )
+
+
+@app.post("/api/agentic/stream")
+def agentic_stream(req: AgenticRunRequest) -> StreamingResponse:
+    """**流式**：逐事件推，前端据此画「决策链路」时间线。
+
+    帧协议（`type` 即帧类型）：
+
+        data: {"type":"start",    "question":"...", "plan":[{round,channel}]}
+        data: {"type":"route",    "needRetrieval":true, "reason":"...", "ms":..}
+        data: {"type":"retrieve", "round":1, "channel":"vector", "query":"...", "hits":[...], "ms":..}
+        data: {"type":"grade",    "round":1, "useful":false, "kept":[0], "missing":"...", "ms":..}
+        data: {"type":"rewrite",  "round":1, "from":"...", "to":"...", "why":"...", "ms":..}
+        data: {"type":"answer_delta", "text":"..."}
+        data: {"type":"finish",   "answer":"...", "rounds":2, "basedOn":"hybrid", "times":{...}}
+        data: {"type":"error",    "message":"..."}
+
+    ⭐ `route` 帧是本阶段最关键的一屏：它让「这一步要不要检索」这个过去藏在
+    代码里的 `if`，第一次变成可以给用户看、也可以被质疑的判断。
+    """
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in agentic.run_agentic(
+                client,
+                req.question,
+                model=req.model,
+                max_rounds=req.maxRounds,
+                top_k=req.topK,
+                hops=req.hops,
+                grade_limit=req.gradeLimit,
+                temperature=req.temperature,
+            ):
+                yield sse(event)
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"Agentic RAG 运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
