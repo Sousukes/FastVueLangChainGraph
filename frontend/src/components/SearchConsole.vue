@@ -10,8 +10,6 @@ onMounted(() => {
   s.question.value = 'RAG 的切块大小一般取多少？为什么要留重叠？'
 })
 
-const canRun = computed(() => !!s.question.value.trim() && !s.running.value)
-
 /** 来源按"被引用优先、其次按检索排名"排序，让被引用的来源浮到前面 */
 const sortedSources = computed(() =>
   [...s.sources.value].sort((a, b) => Number(b.cited) - Number(a.cited) || a.rank - b.rank),
@@ -37,14 +35,14 @@ const sortedSources = computed(() =>
           class="search-input"
           type="text"
           placeholder="问一个需要查资料的问题，比如「重排是怎么做的」"
-          @keyup.enter="canRun && s.run()"
+          @keyup.enter="s.canRun.value && s.run()"
         />
         <el-button
           class="search-go"
           size="default"
           type="primary"
           :loading="s.running.value"
-          :disabled="!canRun"
+          :disabled="!s.canRun.value"
           @click="s.run()"
         >
           {{ s.running.value ? '检索中…' : '搜索' }}

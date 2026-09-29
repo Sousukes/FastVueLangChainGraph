@@ -112,7 +112,15 @@ export function useSearch(options: UseSearchOptions = {}) {
     let m: RegExpExecArray | null
     while ((m = re.exec(text)) !== null) {
       if (m.index > last) parts.push({ kind: 'text', value: text.slice(last, m.index) })
-      parts.push({ kind: 'cite', value: Number(m[1]) })
+      const n = Number(m[1])
+      // 只把"确实指向某个来源"的 [n] 渲染成可点击 chip。越界下标（如来源只有 3 条却出现 [9]）
+      // 退回纯文本，避免点击 focusSource(n) 因找不到 src-n 元素而静默无反应。
+      // 后端 _parse_citations 只过滤 citations 列表里的越界项，原始答案文本里的越界标记这里兜底。
+      if (retrievedCount.value > 0 && n >= 1 && n <= retrievedCount.value) {
+        parts.push({ kind: 'cite', value: n })
+      } else {
+        parts.push({ kind: 'text', value: m[0] })
+      }
       last = m.index + m[0].length
     }
     if (last < text.length) parts.push({ kind: 'text', value: text.slice(last) })
