@@ -769,7 +769,7 @@ cd frontend
 pnpm dev
 ```
 
-打开 <http://localhost:5173/graph>。
+打开 `http://localhost:5173/graph`。
 
 ### 5.1 不需要 Key 就能看的部分
 
@@ -826,7 +826,7 @@ done
 
 ### 5.4 前端验证清单（逐项实测）
 
-打开 <http://localhost:5173/graph>：
+打开 `http://localhost:5173/graph`：
 
 - [x] 顶栏标题变成「阶段 09 · GraphRAG 知识图谱」，左侧进度轨第 09 格高亮
 - [x] 状态条：**320 实体 / 335 关系边 / 4.9% 覆盖率 20 / 412 块** + 六类实体分布
