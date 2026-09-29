@@ -91,6 +91,8 @@ from schemas import (
     VoiceTermCheck,
     ComputerAction,
     ComputerElement,
+    ComputerProviderInfo,
+    ComputerProvidersResponse,
     ComputerRequest,
     ComputerResponse,
     ComputerScreen,
@@ -111,6 +113,11 @@ import research
 import vision  # noqa: F401  端点函数体里用到；漏了它 import main 照样成功，首次调用才 500
 import voice  # noqa: F401  同上：这行少了，页面点「开始」才会 500
 import computer  # noqa: F401  同上。想确认没漏，跑 _check_globals.py：期望 MISSING: none
+import brains  # noqa: F401  阶段 18B：端点里用到 brains.preflight / provider_infos。
+#                             ⚠️ 这行当初真的漏过一次 —— 补上它之前，_check_globals.py 报
+#                             {"computer_run": ["brains"], "computer_stream": ["brains"],
+#                              "computer_providers": ["brains"]}，而 import main 依然成功、
+#                             54 条路由照样注册。这就是那个检查器存在的全部理由。
 
 app = FastAPI(title="全栈 AI 研究助手 · FastAPI + Vue3 全栈 LLM 实战")
 
@@ -1260,7 +1267,12 @@ def computer_run(req: ComputerRequest) -> ComputerResponse:
     碰不到真实文件系统 / 鼠标 / 网络。沙箱不是可选项 —— 是 Computer Use 的第一原则
     （官方要求跑在 Docker/VM 里，否则模型能在你本机随便点）。
     """
-    client = get_client()
+    # provider="claude" 时用不到 DeepSeek client，所以 DeepSeek 缺 Key
+    # 不该拦住 Claude 那条路（反之亦然：两个 Key 都没有时，下方会给出明确提示）。
+    try:
+        client = get_client()
+    except Exception:  # noqa: BLE001
+        client = None
     try:
         result = computer.run_computer_blocking(
             client,
@@ -1272,7 +1284,11 @@ def computer_run(req: ComputerRequest) -> ComputerResponse:
             temperature=req.temperature,
             max_steps=req.maxSteps,
             allow_dangerous=req.allowDangerous,
+            provider=req.provider,
         )
+    # 配置类错误 → 400（是调用方该改的事）；上游失败 → 502
+    except (brains.ClaudeNotConfigured, brains.ClaudeConfigError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Computer Use 运行失败：{e}") from e
     return ComputerResponse(**result)
@@ -1304,7 +1320,27 @@ def computer_stream(req: ComputerRequest) -> StreamingResponse:
        2. `finish` 一定会发（失败时也发，带部分结果）。所以别用"流是否结束"判断成败，
           要看 `finish.success` / `finish.error`。
     """
-    client = get_client()
+    try:
+        client = get_client()
+    except Exception:  # noqa: BLE001
+        client = None
+
+    # ⚠️ 先校验再开流：provider 非法 / 缺 CLAUDE_API_KEY 都是**开流前**就该 400 的事。
+    #    否则错误只能以「迟到的 error 帧」出现 —— 前端得先建好连接才知道自己配错了。
+    try:
+        brains.preflight(
+            req.provider,
+            client=client,
+            model=req.model,
+            temperature=req.temperature,
+            width=computer.SCREEN_W,
+            height=computer.SCREEN_H,
+            deepseek_tool_spec=computer.COMPUTER_TOOL,
+            deepseek_system_prompt=computer.SYSTEM_PROMPT,
+            deepseek_tool_name=computer.TOOL_NAME,
+        )
+    except (brains.ClaudeNotConfigured, brains.ClaudeConfigError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     def event_gen() -> Iterator[str]:
         try:
@@ -1318,9 +1354,34 @@ def computer_stream(req: ComputerRequest) -> StreamingResponse:
                 temperature=req.temperature,
                 max_steps=req.maxSteps,
                 allow_dangerous=req.allowDangerous,
+                provider=req.provider,
             ):
                 yield sse(event)
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"Computer Use 运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+@app.get("/api/computer/providers", response_model=ComputerProvidersResponse)
+def computer_providers() -> ComputerProvidersResponse:
+    """**这个端点为什么存在**：没有密钥时最糟的体验是「点了才发现不能用」。
+
+    前端一进页面就能拿到「Claude 现在能不能用 / 为什么不能用 / 缺哪个环境变量」，
+    于是可以把按钮置灰并直接给出配置指引，而不是让用户先跑一次再读报错。
+
+    ⚠️ 只报告「配置是否齐备」，**不会**真的去 Ping 一下上游：
+       那样会把一个只读的探活接口变成一个会花钱、会超时的接口。
+       真正能不能用，第一次调用自然会告诉我们。
+    """
+    infos = brains.provider_infos(width=computer.SCREEN_W, height=computer.SCREEN_H)
+    by_id = {i["provider"]: i for i in infos}
+    chosen = "claude" if by_id.get("claude", {}).get("available") else "deepseek"
+    return ComputerProvidersResponse(
+        providers=[ComputerProviderInfo(**i) for i in infos],
+        default=chosen,
+        note=(
+            "provider=auto 的规则：CLAUDE_API_KEY 已配置就用 claude（方案 A 原生 Computer Use），"
+            "否则用 deepseek（仿制，零密钥可跑）。两者共用同一块虚拟屏幕与同一套评分函数，读数可直接对比。"
+        ),
+    )

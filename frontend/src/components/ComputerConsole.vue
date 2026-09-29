@@ -1,10 +1,45 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useComputer } from '../composables/useComputer'
 
 defineProps<{ stage: number; title: string }>()
 
 const s = useComputer()
+
+// ⭐ 进页面就问一次「两个大脑现在能不能用」——而不是等用户点了才发现缺 Key。
+//    这是那个 /providers 端点存在的全部理由。
+onMounted(() => {
+  void s.fetchProviders()
+})
+
+/** 三个选项；不可用的大脑直接置灰，并把「缺什么、去哪儿配」摊在界面上 */
+const brainOptions = computed(() => {
+  const find = (id: string) => s.providers.value.find((p) => p.provider === id)
+  const claude = find('claude')
+  const deepseek = find('deepseek')
+  return [
+    {
+      id: 'auto' as const,
+      label: 'auto',
+      tip: s.providersNote.value || '有 CLAUDE_API_KEY 就用 Claude，否则用 DeepSeek',
+      disabled: false,
+    },
+    {
+      id: 'claude' as const,
+      label: 'Claude（方案 A）',
+      tip: claude?.available ? `原生 Computer Use · ${claude.model}` : (claude?.reason ?? '不可用'),
+      disabled: claude?.available === false,
+    },
+    {
+      id: 'deepseek' as const,
+      label: 'DeepSeek（仿制）',
+      tip: deepseek?.available
+        ? `OpenAI 协议工具调用 · ${deepseek.model}`
+        : (deepseek?.reason ?? '不可用'),
+      disabled: deepseek?.available === false,
+    },
+  ]
+})
 
 const viewBox = computed(() => {
   const sc = s.screen.value
@@ -126,6 +161,47 @@ const hasNarration = computed(() => {
 
       <!-- ============ 右：控制 + 评分 ============ -->
       <div class="col">
+        <!-- 阶段 18B：只换第②步，其余三步不动 -->
+        <div class="panel">
+          <div class="panel-head">
+            <span class="field-label">第②步「向模型要一个决策」用谁 · 其余三步与它无关</span>
+          </div>
+          <div class="brains">
+            <button
+              v-for="opt in brainOptions"
+              :key="opt.id"
+              class="brain-btn"
+              :class="{ on: s.provider.value === opt.id }"
+              :disabled="opt.disabled"
+              :title="opt.tip"
+              @click="s.provider.value = opt.id"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+          <p class="brain-line">
+            实际使用 <code>{{ s.activeProvider.value || s.effectiveProviderId.value }}</code>
+            <span v-if="s.protocol.value">· {{ s.protocol.value }}</span>
+          </p>
+          <p v-if="s.providersError.value" class="brain-line">
+            读不到大脑名单（{{ s.providersError.value }}）—— 不影响运行，点开始即可。
+          </p>
+          <p v-else-if="s.providerBlocked.value" class="brain-blocked">
+            <strong>{{ s.selectedProviderInfo.value?.label }}</strong> 现在不可用：
+            {{ s.selectedProviderInfo.value?.reason }}<br />
+            配置：在 <code>backend/.env</code> 里填 <code>{{ s.selectedProviderInfo.value?.keyEnv }}</code> 后重启后端。
+            端点 <code>{{ s.selectedProviderInfo.value?.endpoint }}</code>
+            <template v-if="s.selectedProviderInfo.value?.toolVersion">
+              <br />工具版本 <code>{{ s.selectedProviderInfo.value?.toolVersion }}</code>
+              —— 必须配 <code>anthropic-beta: {{ s.selectedProviderInfo.value?.betaHeader }}</code>，配错会直接 400
+            </template>
+          </p>
+          <p v-else class="brain-line">
+            <strong>两条路共用同一块虚拟屏幕与同一套评分函数</strong> ——
+            所以它们的命中率、定位偏差可以直接横向对比。
+          </p>
+        </div>
+
         <div class="panel">
           <div class="panel-head"><span class="field-label">任务 · 期望值（ASCII，键盘只能打 ASCII）</span></div>
           <div class="fields">
@@ -203,11 +279,21 @@ const hasNarration = computed(() => {
               <span class="score-k">键盘被丢弃</span>
               <span class="score-v">{{ s.score.value.lostKeystrokes }} 次</span>
             </div>
+            <div class="score-item" :class="s.rejectedActions.value > 0 ? 'warn' : 'good'">
+              <span class="score-k">动作被沙箱拒绝</span>
+              <span class="score-v">{{ s.rejectedActions.value }} 次</span>
+            </div>
             <div class="score-item">
               <span class="score-k">轮数</span>
               <span class="score-v">{{ stepsLabel }}</span>
             </div>
           </div>
+          <p class="score-hint">
+            <strong>动作被沙箱拒绝</strong>在走 Claude 时通常大于 0：Claude 的动作词表比宿主宽
+            （mouse_move / scroll / 双击…），而<em>愿意执行哪些动作由宿主决定，不由模型决定</em>。
+            模型拿到拒绝理由后会改用 left_click —— 这不是故障，是沙箱在正常工作。
+            两个大脑的动作词表差别（自写 schema vs 内置工具）正是本阶段的对照点。
+          </p>
           <p class="score-hint">
             <strong>命中率</strong>回答「有没有点中」，<strong>定位偏差</strong>回答「点得多准」——
             两者都要看：一个 560×50 的大输入框，随便点哪儿都算命中，于是命中率满分也可能毫无精度。
@@ -288,6 +374,61 @@ const hasNarration = computed(() => {
 </template>
 
 <style scoped>
+/* ---- 阶段 18B：两个「大脑」的切换 ---- */
+.brains {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.brain-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.brain-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.brain-btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  font-weight: 600;
+}
+.brain-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.brain-line {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--muted);
+}
+.brain-line strong {
+  color: var(--paper);
+}
+.brain-line code,
+.brain-blocked code {
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+.brain-blocked {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  border-radius: 6px;
+  border-left: 3px solid var(--c-bad, #ff7a72);
+  background: color-mix(in srgb, var(--c-bad, #ff7a72) 10%, transparent);
+  color: var(--paper);
+}
 .console {
   --accent: #a9e34b;
   --miss: var(--c-bad, #ff7a72);

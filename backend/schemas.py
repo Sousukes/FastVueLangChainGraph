@@ -1151,6 +1151,13 @@ class ComputerRequest(BaseModel):
         default=False,
         description="是否允许点击危险按钮。默认 False —— 沙箱默认拦截，要求人工确认（真实 Computer Use 的安全红线）",
     )
+    provider: Literal["auto", "deepseek", "claude"] = Field(
+        default="auto",
+        description=(
+            "用哪个「大脑」（阶段 18B 新增）。auto = 配了 CLAUDE_API_KEY 就走 claude，否则 deepseek。"
+            "⚠️ 这个参数只影响第②步「向模型要一个决策」——屏幕、沙箱、评分三段与它无关"
+        ),
+    )
 
 
 class ComputerResponse(BaseModel):
@@ -1158,6 +1165,10 @@ class ComputerResponse(BaseModel):
 
     task: str
     model: str
+    provider: str = Field(default="deepseek", description="这一轮实际用了哪个大脑：deepseek / claude")
+    protocol: str | None = Field(
+        default=None, description="该大脑说的模型协议（一句话），便于并排对照两种形状"
+    )
     screen: ComputerScreen
     actions: list[ComputerAction] = Field(default_factory=list)
     steps: int = Field(default=0, description="实际跑了几轮（不含被拒的动作）")
@@ -1182,9 +1193,42 @@ class ComputerResponse(BaseModel):
         default=0,
         description="键盘被丢弃的次数 —— 模型想打字但前一次点击没点中输入框；定位失败最硬的证据（纯观测，非模型自述）",
     )
+    rejectedActions: int = Field(
+        default=0,
+        description=(
+            "被沙箱/白名单拒绝的动作数。Claude 的动作词表比宿主宽（mouse_move / scroll / 双击…），"
+            "所以走 Claude 时通常 > 0 —— 这是「动作词表由宿主决定」的正常表现，不是故障"
+        ),
+    )
     transcript: list[str] = Field(default_factory=list, description="模型每一轮的说明文字（它的'自述'）")
 
     times: dict[str, float] = Field(default_factory=dict)
     totalMs: float = 0.0
     llmMs: float = 0.0
     error: str | None = None
+
+
+# ---------- 阶段 18B · provider 可用性 ----------
+
+
+class ComputerProviderInfo(BaseModel):
+    """一个可用大脑的自述：用不用得上、为什么用不上、走哪个端点。"""
+
+    provider: str
+    label: str
+    protocol: str
+    model: str
+    available: bool = Field(description="现在能不能用（缺 Key 时为 False）")
+    reason: str | None = Field(default=None, description="不可用的原因，直接展示给用户")
+    keyEnv: str = Field(description="需要哪个环境变量（前端据此给配置指引）")
+    endpoint: str
+    toolVersion: str | None = Field(default=None, description="Claude 的 computer 工具版本")
+    betaHeader: str | None = Field(default=None, description="与之**成对**的 anthropic-beta 头")
+
+
+class ComputerProvidersResponse(BaseModel):
+    """GET /api/computer/providers 的响应。"""
+
+    providers: list[ComputerProviderInfo] = Field(default_factory=list)
+    default: str = Field(description="provider=auto 时实际会选中哪个")
+    note: str = Field(default="", description="一句话说明 auto 的取舍规则")

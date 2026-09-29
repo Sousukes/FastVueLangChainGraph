@@ -82,12 +82,39 @@ export interface ComputerScore {
   lostKeystrokes: number
 }
 
+/** 一个「大脑」的自述 —— 阶段 18B：同一个循环，第②步可换 */
+export interface ComputerProviderInfo {
+  provider: string
+  label: string
+  protocol: string
+  model: string
+  /** 现在能不能用（缺 Key 时为 false） */
+  available: boolean
+  /** 不可用的原因，直接展示给用户 */
+  reason?: string | null
+  /** 需要哪个环境变量 —— 前端据此给出配置指引 */
+  keyEnv: string
+  endpoint: string
+  toolVersion?: string | null
+  betaHeader?: string | null
+}
+
+export interface ComputerProvidersResponse {
+  providers: ComputerProviderInfo[]
+  /** provider=auto 时后端实际会选中哪个 */
+  default: string
+  note: string
+}
+
 /** SSE 一帧的载荷，与 backend/main.py 的 computer_stream 一一对应 */
 type ComputerFrame = {
   type?: string
   // start
   task?: string
   model?: string
+  provider?: string
+  protocol?: string | null
+  brain?: Record<string, unknown>
   screen?: ComputerScreen
   expected?: Record<string, string>
   maxSteps?: number
@@ -125,6 +152,7 @@ type ComputerFrame = {
   avgClickErrorPx?: number
   avgCenterOffsetPx?: number
   lostKeystrokes?: number
+  rejectedActions?: number
   times?: Record<string, number>
   totalMs?: number
   llmMs?: number
@@ -148,6 +176,11 @@ export function useComputer(options: UseComputerOptions = {}) {
   const maxSteps = ref(8)
   const allowDangerous = ref(false)
   const showBoxes = ref(true)
+  /**
+   * 用哪个大脑（阶段 18B）。'auto' = 后端按「有没有 CLAUDE_API_KEY」自己选。
+   * ⚠️ 这个选项只影响第②步；屏幕、沙箱、评分对它是无感知的。
+   */
+  const provider = ref<'auto' | 'deepseek' | 'claude'>('auto')
 
   // ---- 运行状态 ----
   const running = ref(false)
@@ -155,6 +188,9 @@ export function useComputer(options: UseComputerOptions = {}) {
 
   // ---- 结果：屏幕规格 + 每步截图 + 动作流水 ----
   const model = ref('')
+  /** 这一轮**实际**用了哪个大脑（由 start / finish 帧回报，不是前端猜的） */
+  const activeProvider = ref('')
+  const protocol = ref('')
   const screen = ref<ComputerScreen | null>(null)
   const expected = ref<Record<string, string>>({})
   const shots = ref<ComputerShot[]>([])
@@ -179,6 +215,8 @@ export function useComputer(options: UseComputerOptions = {}) {
   const times = ref<Record<string, number>>({})
   const totalMs = ref(0)
   const llmMs = ref(0)
+  /** 被沙箱/白名单拒绝的动作数 —— 走 Claude 时通常 > 0（它的动作词表比宿主宽） */
+  const rejectedActions = ref(0)
   const finished = ref(false)
 
   /** 用户可以在步进条上回看任意一步；null 表示跟随最新 */
@@ -202,7 +240,45 @@ export function useComputer(options: UseComputerOptions = {}) {
   /** 当前显示那一步的动作（时间线高亮用） */
   const actionsOnView = computed(() => actions.value.filter((a) => a.step === viewStepNo.value))
 
-  const canRun = computed(() => !running.value)
+  // ---- 可用的「大脑」（阶段 18B）----
+  const providers = ref<ComputerProviderInfo[]>([])
+  const providersNote = ref('')
+  const providersError = ref<string | null>(null)
+  const defaultProvider = ref('deepseek')
+
+  /**
+   * ⭐ 为什么要单独拉一次名单：没有 Key 时最糟的体验是**点了才发现不能用**。
+   * 进页面就问一次，于是可以把按钮直接置灰并给出配置指引。
+   */
+  async function fetchProviders() {
+    try {
+      const resp = await fetch(`${apiBase}/computer/providers`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = (await resp.json()) as ComputerProvidersResponse
+      providers.value = data.providers ?? []
+      providersNote.value = data.note ?? ''
+      defaultProvider.value = data.default ?? 'deepseek'
+      providersError.value = null
+    } catch (e) {
+      providersError.value = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  /** 'auto' 在后端实际等于谁 */
+  const effectiveProviderId = computed(() =>
+    provider.value === 'auto' ? defaultProvider.value : provider.value,
+  )
+
+  const selectedProviderInfo = computed<ComputerProviderInfo | null>(
+    () => providers.value.find((p) => p.provider === effectiveProviderId.value) ?? null,
+  )
+
+  /** 选中的大脑现在不可用 → 按钮置灰（找不到名单时不过度拦截） */
+  const providerBlocked = computed(
+    () => providers.value.length > 0 && selectedProviderInfo.value?.available === false,
+  )
+
+  const canRun = computed(() => !running.value && !providerBlocked.value)
 
   /** 屏幕容器的宽高比，覆盖层才不会被拉变形 */
   const aspectStyle = computed(() => ({
@@ -225,9 +301,12 @@ export function useComputer(options: UseComputerOptions = {}) {
       hitClicks: 0,
       clickHitRate: 0,
       avgClickErrorPx: 0,
-    avgCenterOffsetPx: 0,
+      avgCenterOffsetPx: 0,
       lostKeystrokes: 0,
     }
+    activeProvider.value = ''
+    protocol.value = ''
+    rejectedActions.value = 0
     stepsUsed.value = 0
     times.value = {}
     totalMs.value = 0
@@ -253,6 +332,7 @@ export function useComputer(options: UseComputerOptions = {}) {
           date: date.value,
           maxSteps: maxSteps.value,
           allowDangerous: allowDangerous.value,
+          provider: provider.value,
         }),
       })
       if (!resp.ok || !resp.body) {
@@ -299,6 +379,8 @@ export function useComputer(options: UseComputerOptions = {}) {
     switch (p.type) {
       case 'start':
         model.value = p.model ?? model.value
+        activeProvider.value = p.provider ?? activeProvider.value
+        protocol.value = p.protocol ?? protocol.value
         screen.value = p.screen ?? screen.value
         expected.value = p.expected ?? {}
         break
@@ -351,6 +433,9 @@ export function useComputer(options: UseComputerOptions = {}) {
           avgCenterOffsetPx: p.avgCenterOffsetPx ?? 0,
           lostKeystrokes: p.lostKeystrokes ?? 0,
         }
+        rejectedActions.value = p.rejectedActions ?? 0
+        activeProvider.value = p.provider ?? activeProvider.value
+        protocol.value = p.protocol ?? protocol.value
         stepsUsed.value = p.steps ?? 0
         times.value = p.times ?? {}
         totalMs.value = p.totalMs ?? 0
@@ -412,6 +497,7 @@ export function useComputer(options: UseComputerOptions = {}) {
     maxSteps,
     allowDangerous,
     showBoxes,
+    provider,
     // 状态
     running,
     error,
@@ -419,6 +505,8 @@ export function useComputer(options: UseComputerOptions = {}) {
     finished,
     // 屏幕与动作
     model,
+    activeProvider,
+    protocol,
     screen,
     expected,
     shots,
@@ -434,6 +522,7 @@ export function useComputer(options: UseComputerOptions = {}) {
     aspectStyle,
     // 评分
     score,
+    rejectedActions,
     stepsUsed,
     times,
     totalMs,
@@ -441,6 +530,14 @@ export function useComputer(options: UseComputerOptions = {}) {
     // 动作
     run,
     clearResult,
+    fetchProviders,
+    providers,
+    providersNote,
+    providersError,
+    defaultProvider,
+    effectiveProviderId,
+    selectedProviderInfo,
+    providerBlocked,
     stepNarration,
     fieldOk,
     centerOf,

@@ -38,10 +38,19 @@ DeepSeek 的坐标精度差得远。**而这个差距恰好是最好的教材**�
     （官方文档明确要求跑在 Docker/VM 里，否则模型能在你本机随便点）。
     危险元素默认被拒（allow_dangerous=False），用来演示"人工确认"这道闸门。
 
-⚠️ 一个协议层的硬约束（本阶段最容易踩的坑）：
+⚠️ 一个协议层的硬约束（阶段 18 最容易踩的坑）：
     OpenAI 兼容协议里 `role="tool"` 的消息**只能装文本**，装不了图片。
     所以执行完动作后，新截图不能当作 tool 结果回传，必须再追加一条
-    `role="user"` 的多模态消息把图带上（见 _result_messages）。
+    `role="user"` 的多模态消息把图带上。
+
+    ⚠️ 但这条"硬约束"其实**只是 OpenAI 协议的形状** —— 阶段 18B 接上 Claude 时，
+    Anthropic 允许把 image 块直接塞进 tool_result，一条消息就够（见 brains.py）。
+    因此那段协议细节已经搬进 `brains.DeepSeekBrain.feedback`：它属于**那个大脑**，
+    不属于这个通用循环。
+
+阶段 18B：本模块的第②步被抽成了可插拔的 brain（`brains.py`）。
+    ① 渲染、③ 执行/沙箱、④ 评分 三段对 provider **完全无感知**，
+    `provider="auto"` 时——配了 CLAUDE_API_KEY 就走 Claude（方案 A），否则走 DeepSeek。
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from typing import Any, Iterator
 
 from PIL import Image, ImageDraw, ImageFont
 
+import brains
 from llm import LLMClient
 
 # ---------------------------------------------------------------------------
@@ -547,30 +557,6 @@ def score(state: dict, expected: dict[str, str], actions: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _result_messages(step: int, tool_notes: list[tuple[str | None, str]], shot: str) -> list[dict]:
-    """执行完动作后要追加的两类消息。
-
-    ⚠️ 这里是本阶段**最容易踩的协议坑**：
-      `role="tool"` 的消息只能装文本，装不了图片。所以新截图不能当 tool 结果回传，
-      必须再补一条 `role="user"` 的多模态消息把图带上。
-      而每个 tool_call 又**必须**有配对的 tool 消息，否则 API 直接报错。
-      两件事都得做，顺序也不能反 —— 见下面的 callers。
-    """
-    msgs: list[dict] = []
-    for call_id, note in tool_notes:
-        msgs.append({"role": "tool", "tool_call_id": call_id, "content": note})
-    msgs.append(
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"第 {step} 轮动作已执行完毕。这是**执行后**的新屏幕截图："},
-                {"type": "image_url", "image_url": {"url": shot}},
-            ],
-        }
-    )
-    return msgs
-
-
 def _shot(state: dict, buckets: dict[str, float]) -> str:
     t0 = time.perf_counter()
     png = render_screen(state)
@@ -589,10 +575,11 @@ def run_computer(
     temperature: float = 0.2,
     max_steps: int = 8,
     allow_dangerous: bool = False,
+    provider: str = "auto",
 ) -> Iterator[dict]:
     """跑一轮 Computer Use。逐帧产出（`type` 即帧类型）：
 
-        start    任务 / 模型 / 屏幕规格（含元素真值）/ 期望值 / 上限
+        start    任务 / 模型 / **provider** / 屏幕规格（含元素真值）/ 期望值 / 上限
         screen   一张屏幕截图 + 当前状态（step=0 是初始屏）
         delta    模型这一轮正在说的话（流式增量）
         action   执行并评分过的一个动作
@@ -600,9 +587,33 @@ def run_computer(
         error    失败原因（发出后**仍会**继续走到 finish，带上已有的部分结果）
 
     ⭐ 为什么 finish 一定要发：异常一旦冒出生成器，流就断了，前端连半截结果都看不到。
+
+    ⭐ provider（阶段 18B 新增，默认 "auto"）：
+
+        "deepseek"  OpenAI 协议的工具调用（阶段 18 的原行为，零密钥可用）
+        "claude"    Anthropic Messages + 内置 computer 工具（方案 A，需 CLAUDE_API_KEY）
+        "auto"      配了 CLAUDE_API_KEY 就用 claude，否则 deepseek
+
+    注意这个参数**只影响第②步**：屏幕、沙箱、评分三段的代码里没有一处读它。
+    换 provider 时读数仍然可比（同一块屏幕、同一套真值、同一个评分函数）——
+    这正是"四步里只有一步是厂商卖的"这句话的可验证形式。
     """
     expected = {"field_order": order_id, "field_amount": amount, "field_date": date}
     task_text = (task or "").strip() or build_task(order_id, amount, date)
+
+    # 先造大脑：provider 非法 / 缺 CLAUDE_API_KEY 都在这里就报出来，
+    # 端点趁早把它转成 400 —— 而不是流开了一半才冒出错误帧。
+    brain = brains.make_brain(
+        provider,
+        client=client,
+        model=model,
+        temperature=temperature,
+        width=SCREEN_W,
+        height=SCREEN_H,
+        deepseek_tool_spec=COMPUTER_TOOL,
+        deepseek_system_prompt=SYSTEM_PROMPT,
+        deepseek_tool_name=TOOL_NAME,
+    )
 
     started = time.perf_counter()
     buckets: dict[str, float] = {"render": 0.0, "llm": 0.0}
@@ -613,7 +624,10 @@ def run_computer(
     yield {
         "type": "start",
         "task": task_text,
-        "model": model or client.model,
+        "model": brain.model,
+        "provider": brain.name,
+        "protocol": brain.protocol,
+        "brain": brain.describe(),
         "screen": screen_spec(),
         "expected": expected,
         "maxSteps": max_steps,
@@ -621,16 +635,8 @@ def run_computer(
     }
     yield {"type": "screen", "step": 0, "image": first_shot, "state": public_state(state), "revision": state["revision"]}
 
-    messages: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": task_text},
-                {"type": "image_url", "image_url": {"url": first_shot}},
-            ],
-        },
-    ]
+    # 开场消息的形状也是协议相关的（system 是角色还是顶层参数？图放哪？）→ 问大脑
+    messages: list[dict] = brain.open(task_text, first_shot)
 
     actions: list[dict] = []
     transcript: list[str] = []
@@ -639,17 +645,14 @@ def run_computer(
 
     for step in range(1, max_steps + 1):
         t0 = time.perf_counter()
-        content = ""
-        message: dict | None = None
+        decision: dict | None = None
         try:
-            for ev in client.stream_message(
-                messages, model=model, temperature=temperature, tools=[COMPUTER_TOOL], tool_choice="auto"
-            ):
+            # ⭐ 整个循环里**只有这一处**碰模型 —— 换成哪个大脑，循环一无所知。
+            for ev in brain.decide(messages):
                 if "delta" in ev:
-                    content += ev["delta"]
                     yield {"type": "delta", "step": step, "text": ev["delta"]}
-                elif "message" in ev:
-                    message = ev["message"]
+                elif "decision" in ev:
+                    decision = ev["decision"]
         except Exception as e:  # noqa: BLE001
             buckets["llm"] = round(buckets["llm"] + (time.perf_counter() - t0) * 1000, 2)
             failure = f"第 {step} 轮调用模型失败：{e}"
@@ -657,36 +660,34 @@ def run_computer(
             break
         buckets["llm"] = round(buckets["llm"] + (time.perf_counter() - t0) * 1000, 2)
 
-        content = (content or "").strip()
-        if content:
-            transcript.append(content)
-
-        if message is None:
+        if decision is None:
             failure = f"第 {step} 轮没有拿到模型回复。"
             yield {"type": "error", "message": failure}
             break
 
-        messages.append(message)
-        calls = message.get("tool_calls") or []
-        if not calls:
+        narration = (decision.get("narration") or "").strip()
+        if narration:
+            transcript.append(narration)
+
+        messages.append(decision["assistant"])
+        chosen = decision.get("actions") or []
+        if not chosen:
             # 模型不再调用工具 → 它认为任务结束（这是唯一的正常出口）
             break
 
         rounds = step
         notes: list[tuple[str | None, str]] = []
 
-        for call in calls:
-            fn = call.get("function") or {}
-            name = fn.get("name") or ""
-            args = _safe_args(fn.get("arguments") or "")
-            call_id = call.get("id")
-
-            if name != TOOL_NAME:
-                note = f"没有名为 {name!r} 的工具，请使用 {TOOL_NAME}。"
-                notes.append((call_id, note))
+        for act in chosen:
+            call_id = act.get("call_id")
+            if act.get("error"):
+                # 大脑在解析阶段就发现的问题（比如工具名不对），原样回给模型
+                notes.append((call_id, act["error"]))
                 continue
 
-            rec, note, landed = _step(state, args.get("action"), args, allow_dangerous)
+            rec, note, landed = _step(
+                state, act.get("action"), act.get("args") or {}, allow_dangerous
+            )
             rec["step"] = step
             rec["note"] = note  # 原样带上：这是模型**看到**的反馈，时间线直接显示
             # 键盘被丢弃 → 打上标记（这是定位失败的硬证据，评分要用）
@@ -699,20 +700,33 @@ def run_computer(
             yield {"type": "action", **rec}
             notes.append((call_id, note))
 
-        # ⚠️ 先补齐 tool 结果（每个 call 都要有一条），再用 user 消息把新截图带上
+        # ⚠️ 回灌的形状是**协议相关**的，交给大脑自己决定：
+        #    OpenAI 协议 → 「tool 消息装文本」+「另起一条 user 消息带图」，共两条；
+        #    Anthropic 协议 → 一条 user 消息，图直接塞进 tool_result 里。
         shot = _shot(state, buckets)
-        messages.extend(_result_messages(step, notes, shot))
-        yield {"type": "screen", "step": step, "image": shot, "state": public_state(state), "revision": state["revision"]}
-
+        messages.extend(brain.feedback(step, notes, shot))
+        yield {
+            "type": "screen",
+            "step": step,
+            "image": shot,
+            "state": public_state(state),
+            "revision": state["revision"],
+        }
     sc = score(state, expected, actions)
     payload: dict[str, Any] = {
         "task": task_text,
-        "model": model or client.model,
+        "model": brain.model,
+        "provider": brain.name,
+        "protocol": brain.protocol,
         "screen": screen_spec(),
         "actions": actions,
         "steps": rounds,
         "state": public_state(state),
         **sc,
+        # 被沙箱/白名单拒绝的动作数。Claude 的动作词表比我们宽（mouse_move / scroll /
+        # double_click…），所以走 Claude 时这个数字通常 > 0 —— 这不是故障，
+        # 而是"宿主决定动作词表"的正常表现，值得单独摊出来看。
+        "rejectedActions": sum(1 for a in actions if not a.get("ok")),
         "transcript": transcript,
         "times": dict(buckets),
         "totalMs": round((time.perf_counter() - started) * 1000, 2),
@@ -745,12 +759,15 @@ def run_computer_blocking(client: LLMClient, task: str | None = None, **kwargs: 
     }
     return {
         "task": start.get("task") or (task or ""),
-        "model": start.get("model") or kwargs.get("model") or client.model,
+        "model": start.get("model") or kwargs.get("model") or (client.model if client else "?"),
+        "provider": start.get("provider") or kwargs.get("provider") or "auto",
+        "protocol": start.get("protocol"),
         "screen": start.get("screen") or screen_spec(),
         "actions": action_frames,
         "steps": 0,
         "state": public_state(empty_state),
         **score(empty_state, fallback_expected, action_frames),
+        "rejectedActions": 0,
         "transcript": [],
         "times": {},
         "totalMs": 0.0,

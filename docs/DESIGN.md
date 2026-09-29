@@ -37,7 +37,8 @@
 
 > 具体补丁版本（FastAPI / Vue3 / Element Plus / VitePress / ChromaDB / DeepSeek 模型 id）以**动笔时最新稳定版**为准，不硬编码。
 
-> **⚠️ 变更记录（阶段 18 动笔时改定）**：本节原定「Computer Use 需 Claude 能力，保留 Claude 为唯一例外（方案 A）」。
+> **⚠️ 变更记录（阶段 18 动笔时改定；同日追加 18B，把方案 A 补回为可选）**：
+> 本节原定「Computer Use 需 Claude 能力，保留 Claude 为唯一例外（方案 A）」。
 > 实做前重新核查后改为 **方案 C · DeepSeek 视觉仿制**，理由：
 > 1. `.env` 里 `CLAUDE_API_KEY` **为空**，且 `CLAUDE_BASE_URL` 指向 Anthropic **原生**端点
 >    （`/v1/messages` + `anthropic-beta` 头 + `x-api-key`），而本项目的 `llm.py` 只会说 OpenAI 协议 ——
@@ -48,6 +49,26 @@
 >    **代价是坐标精度**，而精度差恰好是本阶段最好的教材（详见 [`stages/18-ComputerUse.md`](./stages/18-ComputerUse.md) §5）；
 > 4. 「Claude 是唯一例外」在 2026 年已不准确（OpenAI 的 Responses API `computer` 工具、Gemini 的 `computer_use` 都可用），
 >    但对本项目结论不变：它们各自都不在 OpenAI Chat Completions 的形状里。
+
+> **✅ 追加（阶段 18B）**：上面第 1 条把「`CLAUDE_API_KEY` 为空」当成了**放弃方案 A 的理由**，
+> 但那是**本机当下的状态**，不是学习者必然的状态 —— 按原计划「拿到 Claude 就演示」更合本意。
+> 于是 18B 把方案 A **按原计划补回，但作为可选 provider**：
+> - 默认仍是 **方案 C**（零密钥、零依赖、开箱即跑），`provider=auto` 时若有 Claude Key 则自动选用 A；
+> - 实现**没有引入 `anthropic` SDK**：直接用已有的 `httpx` 打 `POST /v1/messages`，
+>   带 `anthropic-beta: computer-use-2025-01-24` 与内置工具 `computer_20250124`；
+> - 因此「走 Claude 要新增一个 SDK」这条理由**被证伪**了，剩下两条（付费 Key、Docker 沙箱）依然成立；
+> - 沙箱这条本阶段**天然满足**：被操作的「电脑」是我们自己渲染的一屏虚拟桌面，
+>   所有动作只改内存状态，碰不到真实文件系统 / 鼠标 / 键盘 / 网络。
+>
+> 关键结构：闭环里唯一绑定厂商的第②步被抽成**可插拔大脑**（`backend/brains.py`），
+> 主循环、动作白名单、坐标钳制、危险动作闸门、评分逻辑**一行未改** —— 这正是本条注记
+> 「只有一步是厂商卖的」从论断变成可执行代码的证据。详见
+> [`stages/18B-ComputerUseClaude.md`](./stages/18B-ComputerUseClaude.md)。
+>
+> ⚠️ 诚实声明：`docs.anthropic.com` 在当前网络**被地区屏蔽**（跳转 `app-unavailable-in-region`），
+> 线格式是依据二手资料核实的；且**无 Key 无法真机验证 Claude 路径**。18B 用**本地 mock 服务**
+> 断言我们发出的字节（请求头 / 工具定义 / 消息形状 / 图放在 `tool_result` 里），
+> 但**未验证真实 Anthropic 服务的响应**——这一点在文档 §5 ④ 明确标注为「未实测」。
 
 > **安全红线不变**：真实 Computer Use 必须跑在沙箱里（官方要求 Docker/VM）。本阶段把「被操作的电脑」
 > 做成一屏自渲染的虚拟桌面，所有动作只改内存状态，碰不到真实文件系统/鼠标/网络，危险动作默认被拒。
@@ -73,7 +94,7 @@
 | 15 | Deep Research | 主线 |
 | 16 | 多模态·图像 | 主线（能力插件） |
 | 17 | 多模态·语音 | 主线（能力插件） |
-| 18 | Computer Use（仿制：DeepSeek 视觉 + 自渲染虚拟屏幕） | 主线 |
+| 18 | Computer Use（默认：DeepSeek 视觉 + 自渲染虚拟屏幕；可选 Claude 原生 Computer Use） | 主线 |
 
 ## 四、单阶段模板（7 段，统一）
 1. 阶段目标
