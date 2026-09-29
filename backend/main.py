@@ -81,6 +81,10 @@ from schemas import (
     ToolInfo,
     ToolRunRequest,
     ToolRunResponse,
+    VisionField,
+    VisionImageMeta,
+    VisionRequest,
+    VisionResponse,
     to_dicts,
 )
 from extract import extract_one
@@ -1071,5 +1075,93 @@ def research_stream(req: ResearchRequest) -> StreamingResponse:
                 yield sse(event)
         except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
             yield sse({"type": "error", "message": f"深度研究运行失败：{e}"})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())
+
+
+# ---------- 阶段 16 · 多模态·图像 ----------
+
+
+@app.post("/api/vision/run", response_model=VisionResponse)
+def vision_run(req: VisionRequest) -> VisionResponse:
+    """非流式：解析图片 → 拼多模态消息 → 调用模型 → 返回回答或字段表。
+
+    `image` 非法（编码 / 格式 / 大小）时返回 **400**（输入问题），而不是 502（上游问题）——
+    这个区分由 `vision.VisionInputError` 承担。
+    """
+    client = get_client()
+    try:
+        result = vision.run_vision_blocking(
+            client,
+            req.image,
+            question=req.question,
+            mode=req.mode,
+            schema_hint=req.schemaHint,
+            model=req.model,
+            detail=req.detail,
+            temperature=req.temperature,
+        )
+    except vision.VisionInputError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"图像理解运行失败：{e}") from e
+
+    return VisionResponse(
+        mode=result["mode"],
+        model=result.get("model", client.model),
+        question=result.get("question"),
+        answer=result.get("answer"),
+        summary=result.get("summary"),
+        fields=[VisionField(**f) for f in result.get("fields", [])],
+        extracted=result.get("extracted", False),
+        image=VisionImageMeta(**result["image"]) if result.get("image") else None,
+        times=result.get("times", {}),
+        totalMs=result.get("totalMs", 0.0),
+        llmMs=result.get("llmMs", 0.0),
+        error=result.get("error"),
+    )
+
+
+@app.post("/api/vision/stream")
+def vision_stream(req: VisionRequest) -> StreamingResponse:
+    """**流式**：逐事件推，前端据此渲染图片元数据、流式回答 / 字段表。
+
+    帧协议（`type` 即帧类型）：
+
+        data: {"type":"start", "mode":"qa", "model":"...", "image":{...meta}}
+        data: {"type":"answer_delta", "text":"..."}
+        data: {"type":"structured", "summary":"...", "fields":[{"label":..,"value":..}], "raw":"..."}
+        data: {"type":"finish", "answer":"...", "mode":"qa", "image":{...}, "fields":[...],
+               "extracted":false, "times":{...}, "totalMs":.., "llmMs":..}
+        data: {"type":"error", "message":"..."}
+
+    ⭐ `start.image` 是服务端**嗅探魔数**得到的客观元数据（含 `mismatch`：声明 mime 与真实格式是否不符），
+       前端把它当成一张"体检单"展示——这是"确定性管线"的可见证据。
+    """
+    # 先校验（非法图片直接 400），再开流；否则错误只能以帧的形式迟到
+    try:
+        vision.parse_image(req.image)
+    except vision.VisionInputError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    client = get_client()
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in vision.run_vision(
+                client,
+                req.image,
+                question=req.question,
+                mode=req.mode,
+                schema_hint=req.schemaHint,
+                model=req.model,
+                detail=req.detail,
+                temperature=req.temperature,
+            ):
+                yield sse(event)
+        except vision.VisionInputError as e:
+            yield sse({"type": "error", "message": str(e)})
+        except Exception as e:  # noqa: BLE001  生成器里抛异常只会断流，前端什么都看不到
+            yield sse({"type": "error", "message": f"图像理解运行失败：{e}"})
 
     return StreamingResponse(event_gen(), media_type="text/event-stream", headers=sse_headers())

@@ -941,3 +941,59 @@ class ResearchResponse(BaseModel):
     totalMs: float = 0.0
     llmMs: float = 0.0
     error: str | None = None
+
+
+# ---------- 阶段 16 · 多模态·图像 ----------
+
+
+class VisionRequest(BaseModel):
+    """跑一次图像理解（视觉问答 qa / 结构化抽取 extract）。
+
+    与阶段 14/15 最大的不同：输入不再只有文本——多了一张图。`image` 接受两种形态：
+    完整 data URL（`data:image/png;base64,...`）或纯 base64 字符串；服务端会**以魔数**
+    （而不是声明的 mime）判断真实格式。`mode` 决定输出是一段「流式回答」还是一张「字段表」。
+    """
+
+    image: str = Field(min_length=16, description="图片：data URL 或纯 base64")
+    question: str = Field(default="", description="qa 模式下的提问；extract 模式下可留空")
+    mode: Literal["qa", "extract"] = Field(default="qa", description="qa=视觉问答；extract=结构化抽取")
+    schemaHint: str | None = Field(default=None, description="extract 模式下描述要抽取哪些字段")
+    model: str | None = None
+    detail: Literal["auto", "low", "high"] = Field(default="auto", description="传给协议的图像精细度")
+    temperature: float = 0.2
+
+
+class VisionImageMeta(BaseModel):
+    """图像解析出来的客观元数据（服务端嗅探魔数 + 读文件头得到，不依赖模型）。"""
+
+    mime: str = Field(description="魔数嗅探出的真实 mime")
+    format: str = Field(description="png / jpeg / gif / webp")
+    bytes: int
+    width: int | None = None
+    height: int | None = None
+    declared: str | None = Field(default=None, description="data URL 里**声明**的 mime（可能与魔数不符）")
+    mismatch: bool = Field(default=False, description="声明的 mime 与魔数嗅探结果是否不一致")
+
+
+class VisionField(BaseModel):
+    """extract 模式抽取出的一个字段。"""
+
+    label: str
+    value: str = ""
+
+
+class VisionResponse(BaseModel):
+    """图像理解的完整结果：回答（或字段表）+ 图像元数据 + 耗时。"""
+
+    mode: str
+    model: str
+    question: str | None = None
+    answer: str | None = None
+    summary: str | None = None
+    fields: list[VisionField] = Field(default_factory=list)
+    extracted: bool = Field(default=False, description="extract 模式下是否成功解析出结构化字段")
+    image: VisionImageMeta | None = None
+    times: dict[str, float] = Field(default_factory=dict)
+    totalMs: float = 0.0
+    llmMs: float = 0.0
+    error: str | None = None
