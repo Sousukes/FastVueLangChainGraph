@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { assertOk, readSseStream, useSseAbort } from './useSseStream'
 
 /** 节点类型 → 颜色。和 docs/design-system.md 的调色板同源：
  *  琥珀（Signal）留给"当前焦点"，青绿（Data）留给"数据/成功"，
@@ -208,6 +209,17 @@ export function useGraph(options: { apiBase?: string } = {}) {
   const busy = ref<'' | 'status' | 'search' | 'ask' | 'overview'>('')
   const error = ref<string | null>(null)
 
+  /**
+   * 中断图谱构建的流式过程。控制台目前还没放「停止」按钮（各阶段 UI 分批加），
+   * 但能力先备好 —— 组件卸载时也可以调它。
+   */
+  const { signal, begin: beginSse, end: endSse, stop: stopSse, aborted } = useSseAbort()
+
+  /** 组件卸载时中断未完成的构建，避免后台继续跑 */
+  function stop() {
+    stopSse()
+  }
+
   async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const resp = await fetch(`${apiBase}${path}`, init)
     if (!resp.ok) {
@@ -289,74 +301,54 @@ export function useGraph(options: { apiBase?: string } = {}) {
       titles: scope.value.length ? scope.value : null,
     }
 
+    const signal = beginSse()
+
     try {
       const resp = await fetch(`${apiBase}/graph/build/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal,
       })
-      if (!resp.ok || !resp.body) {
-        const detail = await resp.text().catch(() => '')
-        throw new Error(`HTTP ${resp.status} · ${detail.slice(0, 200)}`)
-      }
-      await readBuildStream(resp.body)
+      await assertOk(resp)
+      await readSseStream<BuildFrame>(resp.body!, applyBuildFrame, signal)
     } catch (e) {
-      fail('图谱构建失败', e)
+      // 主动停止不是错误：保留已构建出的进度
+      if (!aborted.value) fail('图谱构建失败', e)
     } finally {
+      endSse()
       building.value = false
       // 构建完（或失败）都要刷新一次：实体、边、覆盖率全变了
       await loadAll()
     }
   }
 
-  async function readBuildStream(body: ReadableStream<Uint8Array>) {
-    const reader = body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-
-        for (const frame of frames) {
-          const line = frame.split('\n').find((l) => l.startsWith('data:'))
-          if (!line) continue
-          let payload: BuildFrame
-          try {
-            payload = JSON.parse(line.slice(5).trim()) as BuildFrame
-          } catch {
-            continue
-          }
-          if (payload.error) {
-            error.value = payload.error
-            return
-          }
-          if (payload.phase === 'start') {
-            progress.value = { done: 0, total: payload.total ?? 0, chunk: '', entities: 0, edges: 0 }
-          } else if (payload.phase === 'progress') {
-            progress.value = {
-              done: payload.done ?? 0,
-              total: payload.total ?? 0,
-              chunk: payload.chunk ?? '',
-              entities: payload.entities ?? 0,
-              edges: payload.edges ?? 0,
-            }
-          } else if (payload.phase === 'done') {
-            lastBuild.value = {
-              processed: payload.processed ?? 0,
-              entities: payload.entities ?? 0,
-              edges: payload.edges ?? 0,
-              seconds: payload.seconds ?? 0,
-            }
-          }
-        }
+  /**
+   * 构建阶段的帧语义：`start` 重置进度条 → `progress` 推进 → `done` 落最终统计。
+   * 收到 `error` 帧就返回 true，让读取立刻停止（与原实现一致）。
+   */
+  function applyBuildFrame(payload: BuildFrame): void | boolean {
+    if (payload.error) {
+      error.value = payload.error
+      return true
+    }
+    if (payload.phase === 'start') {
+      progress.value = { done: 0, total: payload.total ?? 0, chunk: '', entities: 0, edges: 0 }
+    } else if (payload.phase === 'progress') {
+      progress.value = {
+        done: payload.done ?? 0,
+        total: payload.total ?? 0,
+        chunk: payload.chunk ?? '',
+        entities: payload.entities ?? 0,
+        edges: payload.edges ?? 0,
       }
-    } finally {
-      reader.releaseLock()
+    } else if (payload.phase === 'done') {
+      lastBuild.value = {
+        processed: payload.processed ?? 0,
+        entities: payload.entities ?? 0,
+        edges: payload.edges ?? 0,
+        seconds: payload.seconds ?? 0,
+      }
     }
   }
 
@@ -464,6 +456,7 @@ export function useGraph(options: { apiBase?: string } = {}) {
     loadEntities,
     loadAll,
     runBuild,
+    stop,
     runSearch,
     runAsk,
     runReset,

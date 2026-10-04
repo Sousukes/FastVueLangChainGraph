@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { assertOk, readSseStream, useSseAbort } from './useSseStream'
 
 /**
  * 阶段 13 · Agentic RAG（把检索交还给智能体决定）。
@@ -143,6 +144,17 @@ export function useAgentic(options: UseAgenticOptions = {}) {
   const running = ref(false)
   const error = ref<string | null>(null)
 
+  /**
+   * 中断本轮流式运行。控制台目前还没放「停止」按钮（各阶段 UI 分批加），
+   * 但能力先备好 —— 组件卸载时也可以调它。
+   */
+  const { signal, begin: beginSse, end: endSse, stop: stopSse, aborted } = useSseAbort()
+
+  /** 组件卸载时中断未完成的流，避免后台继续跑 */
+  function stop() {
+    stopSse()
+  }
+
   /** 决策链路 */
   const routeDecision = ref<{ needRetrieval: boolean; reason: string; degraded: boolean; ms: number } | null>(
     null,
@@ -190,6 +202,8 @@ export function useAgentic(options: UseAgenticOptions = {}) {
     running.value = true
     reset()
 
+    const signal = beginSse()
+
     try {
       const resp = await fetch(`${apiBase}/agentic/stream`, {
         method: 'POST',
@@ -200,46 +214,20 @@ export function useAgentic(options: UseAgenticOptions = {}) {
           topK: topK.value,
           hops: hops.value,
         }),
+        signal,
       })
-      if (!resp.ok || !resp.body) {
-        const detail = await resp.text().catch(() => '')
-        throw new Error(`HTTP ${resp.status} · ${detail.slice(0, 200)}`)
-      }
-      await readStream(resp.body)
+      await assertOk(resp)
+      await readSseStream<AgenticFrame>(resp.body!, apply, signal)
     } catch (e) {
+      // 主动停止不是错误：保留已生成的结果
+      if (aborted.value) return
       error.value = `Agentic RAG 运行失败：${e instanceof Error ? e.message : String(e)}`
     } finally {
+      endSse()
       running.value = false
     }
   }
 
-  async function readStream(body: ReadableStream<Uint8Array>) {
-    const reader = body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-        for (const frame of frames) {
-          const line = frame.split('\n').find((l) => l.startsWith('data:'))
-          if (!line) continue
-          let payload: AgenticFrame
-          try {
-            payload = JSON.parse(line.slice(5).trim()) as AgenticFrame
-          } catch {
-            continue
-          }
-          apply(payload)
-        }
-      }
-    } finally {
-      reader.releaseLock()
-    }
-  }
 
   function ensureRound(n: number): AgenticRound {
     let r = rounds.value.find((x) => x.round === n)
@@ -345,6 +333,7 @@ export function useAgentic(options: UseAgenticOptions = {}) {
     // 动作
     loadChannels,
     run,
+    stop,
     reset,
   }
 }

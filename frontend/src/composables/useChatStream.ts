@@ -1,4 +1,5 @@
 import { ref, shallowRef, readonly, computed } from 'vue'
+import { readSseStream } from './useSseStream'
 
 export interface ChatTurn {
   id: string
@@ -86,7 +87,15 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
         throw new Error(`HTTP ${resp.status} · ${detail.slice(0, 200)}`)
       }
 
-      await readSse(resp.body, assistant)
+      await readSseStream<StreamFrame>(resp.body, (payload) => {
+        if (typeof payload.delta === 'string') {
+          assistant.content += payload.delta
+        } else if (payload.error) {
+          error.value = payload.error
+        } else if (payload.done) {
+          return true // 收尾帧，正常结束
+        }
+      }, controller?.signal)
     } catch (e) {
       const err = e as Error
       // 用户主动停止不是错误：保留已生成的部分
@@ -97,46 +106,6 @@ export function useChatStream(options: UseChatStreamOptions = {}) {
       assistant.streaming = false
       loading.value = false
       controller = null
-    }
-  }
-
-  /** 逐块读取响应体，按 `\n\n` 切帧，把 delta 累加到 assistant 上 */
-  async function readSse(body: ReadableStream<Uint8Array>, target: ChatTurn) {
-    const reader = body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        // stream: true —— 让跨 chunk 的中文等多字节字符不被截断成乱码
-        buffer += decoder.decode(value, { stream: true })
-
-        // SSE 以空行分帧。最后一段可能是不完整的半帧，留在 buffer 里等下一块
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-
-        for (const frame of frames) {
-          const line = frame.split('\n').find((l) => l.startsWith('data:'))
-          if (!line) continue
-          let payload: StreamFrame
-          try {
-            payload = JSON.parse(line.slice(5).trim()) as StreamFrame
-          } catch {
-            continue // 心跳注释等非 JSON 行，忽略
-          }
-          if (typeof payload.delta === 'string') {
-            target.content += payload.delta
-          } else if (payload.error) {
-            error.value = payload.error
-          } else if (payload.done) {
-            return // 收尾帧，正常结束
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock()
     }
   }
 

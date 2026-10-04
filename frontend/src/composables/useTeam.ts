@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { assertOk, readSseStream, useSseAbort } from './useSseStream'
 
 /**
  * 阶段 11：多智能体（Multi-agent）。
@@ -215,6 +216,17 @@ export function useTeam(options: { apiBase?: string } = {}) {
   const writeMs = ref(0)
 
   const error = ref<string | null>(null)
+
+  /**
+   * 中断本轮流式运行。控制台目前还没放「停止」按钮（各阶段 UI 分批加），
+   * 但能力先备好 —— 组件卸载时也可以调它。
+   */
+  const { signal, begin: beginSse, end: endSse, stop: stopSse, aborted } = useSseAbort()
+
+  /** 组件卸载时中断未完成的流，避免后台继续跑 */
+  function stop() {
+    stopSse()
+  }
   const startedAt = ref(0)
   const elapsedMs = ref(0)
   const timer = ref<ReturnType<typeof setInterval> | null>(null)
@@ -317,6 +329,8 @@ export function useTeam(options: { apiBase?: string } = {}) {
       elapsedMs.value = Date.now() - startedAt.value
     }, 120)
 
+    const signal = beginSse()
+
     try {
       const resp = await fetch(`${apiBase}/team/stream`, {
         method: 'POST',
@@ -327,15 +341,16 @@ export function useTeam(options: { apiBase?: string } = {}) {
           max_tasks: maxTasks.value,
           observation_limit: observationLimit.value,
         }),
+        signal,
       })
-      if (!resp.ok || !resp.body) {
-        const detail = await resp.text().catch(() => '')
-        throw new Error(`HTTP ${resp.status} · ${detail.slice(0, 200)}`)
-      }
-      await readStream(resp.body)
+      await assertOk(resp)
+      await readSseStream<TeamFrame>(resp.body!, apply, signal)
     } catch (e) {
+      // 主动停止不是错误：保留已生成的结果
+      if (aborted.value) return
       error.value = `多智能体运行失败：${e instanceof Error ? e.message : String(e)}`
     } finally {
+      endSse()
       running.value = false
       if (timer.value) clearInterval(timer.value)
       elapsedMs.value = 0
@@ -345,35 +360,6 @@ export function useTeam(options: { apiBase?: string } = {}) {
 
   const live = ref('') // 顶层 live：仅给"还没归属任何角色的瞬间"占位，正常不会用到
 
-  async function readStream(body: ReadableStream<Uint8Array>) {
-    const reader = body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-
-        for (const frame of frames) {
-          const line = frame.split('\n').find((l) => l.startsWith('data:'))
-          if (!line) continue
-          let payload: TeamFrame
-          try {
-            payload = JSON.parse(line.slice(5).trim()) as TeamFrame
-          } catch {
-            continue
-          }
-          apply(payload)
-        }
-      }
-    } finally {
-      reader.releaseLock()
-    }
-  }
 
   function apply(p: TeamFrame) {
     switch (p.type) {
@@ -630,6 +616,7 @@ export function useTeam(options: { apiBase?: string } = {}) {
     // 动作
     loadRoles,
     run,
+    stop,
     resetRun,
   }
 }

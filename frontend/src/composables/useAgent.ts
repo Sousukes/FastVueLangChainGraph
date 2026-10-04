@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { assertOk, readSseStream, useSseAbort } from './useSseStream'
 
 /**
  * 阶段 10：单智能体（ReAct）。
@@ -232,6 +233,17 @@ export function useAgent(options: { apiBase?: string } = {}) {
   const busy = ref<'catalog' | ''>('')
   const error = ref<string | null>(null)
 
+  /**
+   * 中断本轮流式运行。控制台目前还没放「停止」按钮（各阶段 UI 分批加），
+   * 但能力先备好 —— 组件卸载时也可以调它。
+   */
+  const { signal, begin: beginSse, end: endSse, stop: stopSse, aborted } = useSseAbort()
+
+  /** 组件卸载时中断未完成的流，避免后台继续跑 */
+  function stop() {
+    stopSse()
+  }
+
   async function call<T>(path: string, init?: RequestInit): Promise<T> {
     const resp = await fetch(`${apiBase}${path}`, init)
     if (!resp.ok) {
@@ -280,14 +292,18 @@ export function useAgent(options: { apiBase?: string } = {}) {
   /**
    * 跑一次 ReAct（SSE 流式）。
    *
-   * 和前几个阶段一样用 fetch + ReadableStream 手动切帧而不是 EventSource：
+   * 和前几个阶段一样用 fetch + ReadableStream 而不是 EventSource：
    * EventSource 只支持 GET，而这里要 POST 一个请求体。
+   *
+   * 切帧/解码/abort 都在 `useSseStream` 里（那段就是阶段 03 讲的原理），
+   * 这里只负责「收到一帧后怎么 apply」。
    */
   async function run() {
     const q = question.value.trim()
     if (!q || running.value) return
     running.value = true
     resetRun()
+    const signal = beginSse()
 
     try {
       const resp = await fetch(`${apiBase}/agent/stream`, {
@@ -300,48 +316,19 @@ export function useAgent(options: { apiBase?: string } = {}) {
           observation_limit: observationLimit.value,
           max_repeat: maxRepeat.value,
         }),
+        signal,
       })
-      if (!resp.ok || !resp.body) {
-        const detail = await resp.text().catch(() => '')
-        throw new Error(`HTTP ${resp.status} · ${detail.slice(0, 200)}`)
-      }
-      await readStream(resp.body)
+      await assertOk(resp)
+      await readSseStream<AgentFrame>(resp.body!, apply, signal)
     } catch (e) {
-      error.value = `智能体运行失败：${e instanceof Error ? e.message : String(e)}`
+      // 主动停止不是错误：保留已生成的步骤
+      if (!aborted.value) {
+        error.value = `智能体运行失败：${e instanceof Error ? e.message : String(e)}`
+      }
     } finally {
+      endSse()
       running.value = false
       live.value = ''
-    }
-  }
-
-  async function readStream(body: ReadableStream<Uint8Array>) {
-    const reader = body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        // TextDecoder 必须带 { stream: true }，否则跨块的中文会乱码（阶段 03 的坑）
-        buffer += decoder.decode(value, { stream: true })
-        const frames = buffer.split('\n\n')
-        buffer = frames.pop() ?? ''
-
-        for (const frame of frames) {
-          const line = frame.split('\n').find((l) => l.startsWith('data:'))
-          if (!line) continue
-          let payload: AgentFrame
-          try {
-            payload = JSON.parse(line.slice(5).trim()) as AgentFrame
-          } catch {
-            continue
-          }
-          apply(payload)
-        }
-      }
-    } finally {
-      reader.releaseLock()
     }
   }
 
@@ -514,6 +501,7 @@ export function useAgent(options: { apiBase?: string } = {}) {
     // 动作
     loadCatalog,
     run,
+    stop,
     resetRun,
     toggleGroup,
     applyPreset,
