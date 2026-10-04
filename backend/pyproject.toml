@@ -9,7 +9,13 @@ dependencies = [
     "openai>=1.40",
     "python-dotenv>=1.0",
     "pydantic>=2.7",
-    "sse-starlette>=2.1",
+    # ⚠️ 这里曾声明 sse-starlette，阶段 18B 删掉了：全项目零引用。
+    #    本项目的 SSE 一律用 fastapi.responses.StreamingResponse + 自建帧格式，
+    #    不走 sse-starlette 的 EventSourceResponse（那会把帧格式交给它的协议）。
+    #    别看着"做 SSE 就该装它"又加回来 —— 先 grep 一下确认真的在用。
+    #
+    # tzdata 不在上面，但**不能删**：tools.py 里的 ZoneInfo 在 Windows 上需要它
+    # （zoneinfo 在 Windows 不带 tz 数据库）。它零 import 属正常，别按"看着没 import"就删。
     "tzdata>=2024.1",
     "chromadb>=0.5",
     # 阶段 07 起：本地嵌入。FastEmbed 走 ONNX，不依赖 torch，体积小、中文可用。
