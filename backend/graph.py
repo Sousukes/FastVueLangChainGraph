@@ -96,6 +96,9 @@ EXTRACT_SYSTEM = (
 _ready = False
 _init_lock = threading.Lock()
 
+# 每个线程各持一个连接（sqlite3.Connection 不能跨线程用，见 _live_conn 的说明）。
+_tls = threading.local()
+
 
 def _connect() -> sqlite3.Connection:
     """开一个连接。**建表与 WAL 只在进程内第一次做，而且要加锁。**
@@ -113,19 +116,21 @@ def _connect() -> sqlite3.Connection:
     前端那边只表现为"状态条全是 0"，不报错也看不出原因，非常隐蔽。
     双检锁（先无锁判一次、加锁再判一次）是这里最省事的正确写法。
 
-    ⚠️ 还要诚实说清楚：**去掉建表之后，单次检索并没有明显变快**（实测仍在 140ms 量级）。
-    拆开测过之后原因很清楚——
+    ⚠️ 还要诚实说清楚：**去掉建表之后，单次检索并没有明显变快**。
+    拆开测过之后原因很清楚——**成本几乎全在"开连接"上，查询本身可以忽略**：
 
-        sqlite3.connect()      约 70ms   ← 真正的大头
-        SELECT name FROM entities  0.33ms
-        20 次按端点查边            0.93ms
-        两跳 expand               6.8ms
+        SELECT name FROM entities   0.01ms
+        sqlite3.connect()           1.35ms   ← 真正的大头，占单次总开销 99%
 
-    **查询本身快到可以忽略，成本全在"开连接"上**（本机是 Windows + 非系统盘，
-    每次打开文件都要过一遍安全扫描）。所以正确的下一步不是优化 SQL，
-    而是**复用连接**——按线程各持一个（`threading.local()`），
-    或者干脆换 PostgreSQL 走连接池。教学版故意留着这一层不抽象，
-    是为了让"连接开销 > 查询开销"这件事被看见；真实项目里它就该被池化掉。
+    （2026-09 曾在冷启动时测到 70ms，那是 Windows 首次访问该文件要过一遍安全扫描的
+    一次性开销，**不是稳态**；2026-10-05 复测已降到 1.35ms。别照抄旧数字，要实测。）
+
+    既然大头是开连接，就该复用。但**连接不能跨线程共享**，所以用
+    `threading.local()`：每个线程第一次调 `_connect()` 时开一个，之后一直用它。
+    线程模型见下方 `_live_conn` 的说明。
+
+    ⚠️ 保留这条记录是因为它值得记住：**教学版故意让"连接开销 > 查询开销"被看见**，
+    所以各函数至今仍在自己的 `finally` 里写 `conn.close()`。真实项目里它就该被池化掉。
     """
     global _ready
     GRAPH_DB.parent.mkdir(parents=True, exist_ok=True)
@@ -141,9 +146,47 @@ def _connect() -> sqlite3.Connection:
                     boot.close()
                 _ready = True
 
+    # 本线程已经开过就直接复用（见 _live_conn 的探活逻辑）
+    cached: sqlite3.Connection | None = getattr(_tls, "conn", None)
+    if cached is not None:
+        return cached
+
     conn = sqlite3.connect(GRAPH_DB)
     conn.row_factory = sqlite3.Row
+    _tls.conn = conn
     return conn
+
+
+def _live_conn() -> sqlite3.Connection:
+    """拿一个**保证可用**的连接。
+
+    ## 为什么需要它（不是多余的包装）
+
+    各函数至今仍在自己的 `finally` 里 `conn.close()` —— 那是上面那段教学取舍的一部分，
+    不打算改函数结构。但这样一来，thread-local 里缓存的那个连接**可能已经被关掉了**，
+    直接返回就会撞 `ProgrammingError: Cannot operate on a closed database`。
+
+    所以每次取连接前先"探活"：执行一条最轻量的 `SELECT 1`，
+    失败就丢弃并重开。开销实测 0.005ms 量级，相对 1.35ms 的开连接可以忽略。
+
+    ## 为什么必须按线程隔离（不能用一个全局连接）
+
+    - `/api/graph/*` 这些同步端点跑在 **FastAPI 的线程池**里，本身就是多线程并发；
+    - `build()` 跑在一个**后台 daemon 线程**里（`main.py` 用 `threading.Thread(target=worker)`），
+      内部还会起 `ThreadPoolExecutor(max_workers=workers)`（最多 12 个工作线程）。
+
+    `sqlite3.Connection` 默认 `check_same_thread=True`，跨线程使用会直接抛异常。
+    用 `threading.local()` 后每个线程各持一个，互不干扰；
+    顺带好处是 WAL 模式下读写能真正并发，不必像共享单连接那样互相等锁。
+    """
+    conn: sqlite3.Connection | None = getattr(_tls, "conn", None)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")  # 探活
+            return conn
+        except Exception:  # noqa: BLE001  已关闭/失效 → 丢弃重开
+            _tls.conn = None
+    return _connect()
 
 
 def _init(conn: sqlite3.Connection) -> None:
@@ -342,7 +385,7 @@ def build(
             "chunks": 0,
         }
 
-    conn = _connect()
+    conn = _live_conn()
     done = {r["chunk_key"] for r in conn.execute("SELECT chunk_key FROM extracted")}
 
     scope = [r for r in rows if not titles or r["title"] in set(titles)]
@@ -402,7 +445,7 @@ def anchor_entities(query: str, limit: int = 6) -> list[str]:
 
     最长优先是为了避免"阶段 07"被拆成"阶段"+"07"两个无意义的锚点。
     """
-    conn = _connect()
+    conn = _live_conn()
     names = [r["name"] for r in conn.execute("SELECT name FROM entities")]
     conn.close()
 
@@ -440,7 +483,7 @@ def expand(seeds: list[str], hops: int = 2) -> dict:
     **注意这里是有向扩展**：既走 head→tail，也走 tail→head。
     因为"谁依赖我"和"我依赖谁"都是有效的关系，只走一个方向会漏掉一半。
     """
-    conn = _connect()
+    conn = _live_conn()
 
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
@@ -612,7 +655,7 @@ def ask(
 
 
 def stats() -> dict:
-    conn = _connect()
+    conn = _live_conn()
     entities = conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"]
     edges = conn.execute("SELECT COUNT(*) c FROM edges").fetchone()["c"]
     chunks = conn.execute("SELECT COUNT(*) c FROM extracted").fetchone()["c"]
@@ -653,7 +696,7 @@ def counts() -> dict:
     比 `stats()` 轻得多（不碰 ChromaDB，不算分布），
     进度回调每完成一块就要问一次，不能顺带把整个语料读一遍。
     """
-    conn = _connect()
+    conn = _live_conn()
     result = {
         "entities": conn.execute("SELECT COUNT(*) c FROM entities").fetchone()["c"],
         "edges": conn.execute("SELECT COUNT(*) c FROM edges").fetchone()["c"],
@@ -668,7 +711,7 @@ def list_entities(limit: int = 200, q: str = "") -> dict:
     `degree` 是连接度——它比 `mentions` 更能说明一个实体在图上有多"枢纽"：
     mentions 高只说明它被反复提到，degree 高说明它真的**连**着很多东西。
     """
-    conn = _connect()
+    conn = _live_conn()
     degree = {
         r["name"]: r["deg"]
         for r in conn.execute(
@@ -705,7 +748,7 @@ def corpus_documents() -> list[dict]:
     前端拿它渲染"构建范围"的勾选框：**先抽你真正关心的那几篇**，
     是让 GraphRAG 从"跑一夜"变成"跑两分钟"的关键操作。
     """
-    conn = _connect()
+    conn = _live_conn()
     done = {r["chunk_key"] for r in conn.execute("SELECT chunk_key FROM extracted")}
     conn.close()
 
@@ -724,7 +767,7 @@ def top_nodes(limit: int = 40) -> dict:
     为什么要截断：一张 300 节点的图在屏幕上只是一团毛线，**信息量为零**。
     先按度数取枢纽，才是"能看懂"的图。
     """
-    conn = _connect()
+    conn = _live_conn()
     rows = conn.execute(
         """
         SELECT name, COUNT(*) AS deg FROM (
@@ -767,7 +810,7 @@ def top_nodes(limit: int = 40) -> dict:
 
 
 def reset() -> None:
-    conn = _connect()
+    conn = _live_conn()
     conn.executescript("DELETE FROM edges; DELETE FROM entities; DELETE FROM extracted;")
     conn.commit()
     conn.close()
