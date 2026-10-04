@@ -31,6 +31,73 @@ interface Pt {
 }
 
 /**
+ * 布局结果的记忆化缓存（**保留最近两份**）。
+ *
+ * ## 为什么需要它
+ *
+ * `layout` 是 computed，依赖 `props.nodes` / `props.edges` / `props.height`。
+ * 实测（Node，同一算法）：n=40 约 20ms、n=200 约 88ms、n=300 约 206ms
+ * —— 一次全量重算就吃掉几十帧预算。
+ *
+ * 但**真正的问题不是单次算得慢，而是它被反复重算**：
+ * `GraphConsole.shown` 每次都返回新数组（`overview.value` 或 `result.value` 的引用），
+ * 只要用户点一次检索、拖一次滑块、或构建进度回填一次，
+ * `nodes`/`edges` 的内容就可能"引用没变但换了数据"，Vue 只能重算整个布局。
+ *
+ * ## 为什么用「内容签名」而不是「引用比较」
+ *
+ * Vue 的 computed 对数组 props 只能做浅比较（同一引用即认为未变）。
+ * 这里数据来自 `await call(...)` 的响应体，**内容变了引用也会变**，
+ * 引用比较在两个方向上都会错：既会漏该重算的，也会白算没变的。
+ * 所以用「节点名 + 边两端」拼一个短签名做 key —— 比深比较快得多，
+ * 又对内容变化敏感。
+ *
+ * ## 为什么是两份而不是一份
+ *
+ * 图谱页只有两种视图（全图 / 检索子图），用户会在两者间来回切。
+ * 只留一份的话，「全图 → 子图 → 全图」的第二次全图会 miss 并把缓存覆盖成子图，
+ * 于是每次切换都重算。留两份（LRU：新的插到前面，命中则提到前面），
+ * 两种视图就都能命中 —— 这正是 `viewMode` 的两个取值。
+ *
+ * ## 注意：这只省掉「重复计算」，不改变计算结果
+ *
+ * 命中缓存时返回的是**同一份数据算出的坐标**，
+ * 同样的输入必然得到同样的输出（布局是纯函数，见下方"初始位置用排序圆环"），
+ * 所以截图可复现性不受影响。
+ */
+const CACHE_SIZE = 2
+let layoutCache: Array<{
+  key: string
+  height: number
+  result: { pts: Pt[]; links: Array<[number, number, GraphEdge]> }
+}> = []
+
+/** 给当前这份 nodes/edges 算一个廉价的内容签名 */
+function signatureOf(nodes: GraphNode[], edges: GraphEdge[]): string {
+  let s = `${nodes.length}|${edges.length}|`
+  for (const n of nodes) s += n.name + ','
+  for (const e of edges) s += e.head + '>' + e.tail + ','
+  return s
+}
+
+/** 取缓存；命中则提到队首（LRU），未命中返回 null */
+function takeFromCache(key: string, height: number) {
+  const i = layoutCache.findIndex((c) => c.key === key && c.height === height)
+  if (i < 0) return null
+  const hit = layoutCache[i]
+  layoutCache.splice(i, 1)
+  layoutCache.unshift(hit)
+  return hit.result
+}
+
+/** 写入缓存：新的插到队首，超出容量丢最旧的 */
+function putInCache(key: string, height: number, result: { pts: Pt[]; links: Array<[number, number, GraphEdge]> }) {
+  layoutCache.unshift({ key, height, result })
+  if (layoutCache.length > CACHE_SIZE) layoutCache.length = CACHE_SIZE
+}
+
+
+/**
  * 力导向布局——**手写的，没引 d3**。
  *
  * 引一个 d3-force 只要几十 KB，但这一阶段要讲的是"图长什么样"，
@@ -43,11 +110,20 @@ interface Pt {
  *
  * 初始位置用**按名字排序后的圆环**，不是随机撒点——
  * 同一份数据每次渲染出来的图必须一模一样，否则没法截图对比。
+ *
+ * ⚠️ 迭代次数（`ITER`）与斥力常数（`8000`）都**刻意不为了性能而调**：
+ * 它们直接决定"图摊多开"的手感，是这个阶段的教学重点之一。
+ * 性能靠上方的**结果记忆化**解决，不靠砍迭代次数。
  */
 const layout = computed(() => {
   const H = props.height
   const nodes = props.nodes
   if (!nodes.length) return { pts: [] as Pt[], links: [] as Array<[number, number, GraphEdge]> }
+
+  // 同一份数据 + 同一个画布高度 → 直接复用上次的坐标，不再重算
+  const key = signatureOf(nodes, props.edges)
+  const cached = takeFromCache(key, H)
+  if (cached) return cached
 
   // 有效度数：后端给了 degree 就用它（全图模式），否则用边数现推（检索子图）
   const edgeDeg = new Map<string, number>()
@@ -142,7 +218,9 @@ const layout = computed(() => {
     p.y = Math.min(H - PAD, Math.max(PAD, p.y))
   }
 
-  return { pts, links }
+  const result = { pts, links }
+  putInCache(key, H, result)
+  return result
 })
 
 /** 计算好的线段：起点/终点都从圆的边界开始，不然箭头会被节点盖住 */
