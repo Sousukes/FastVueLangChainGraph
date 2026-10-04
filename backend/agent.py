@@ -20,6 +20,7 @@ import json
 import time
 from typing import Any, Callable
 
+from _jsonutil import safe_args as _safe_args
 from llm import LLMClient, message_to_dict
 from tools import execute_tool, tools_schema
 
@@ -114,9 +115,3 @@ def run_tool_loop(
     }
 
 
-def _safe_args(raw: str) -> Any:
-    """trace 里展示参数时尽量给结构化形式，解析失败就留原文。"""
-    try:
-        return json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return raw

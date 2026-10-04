@@ -65,8 +65,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterator
 
+from _jsonutil import json_call as _json_call
 from llm import LLMClient
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 import react
 from react import GROUP_GRAPH, GROUP_LOCAL, GROUP_RAG
@@ -267,19 +268,6 @@ class CriticReport(BaseModel):
     issues: list[CriticIssue] = Field(default_factory=list)
 
 
-def _validation_hint(err: ValidationError) -> str:
-    """把 Pydantic 的报错压成一句模型看得懂的话（沿用阶段 04 的做法）。
-
-    直接把 ValidationError 原样塞回去有两大问题：一是很长（几十行），
-    二是全是 Python 术语（"field required" 模型不一定当回事）。
-    """
-    lines = []
-    for e in err.errors()[:4]:
-        loc = ".".join(str(x) for x in e["loc"])
-        lines.append(f"- 字段 {loc}：{e['msg']}（你给的值是 {e.get('input')!r}）")
-    return "\n".join(lines)
-
-
 def _chat_json(
     client: LLMClient,
     messages: list[dict],
@@ -295,48 +283,22 @@ def _chat_json(
     ⭐ 为什么必须自己收口成结构化对象：
     多智能体的交接点一多，任何一个"模型自由发挥了一段话"的环节
     都会变成下游的解析泥潭。**角色之间的接口要像函数签名一样硬。**
+
+    阶段 18B 起实现下沉到 `_jsonutil.py`。本阶段保留**自己的两种提示风格**：
+    `hint_style="team"`（只列前 4 条并附上模型给错的原值）、
+    `retry_style="team"`（自纠措辞不同）。这不是残留的重复，而是本阶段的教学选择。
     """
-    raw = ""
-    # 第一次：带 response_format
-    try:
-        raw = client.chat(
-            messages, model=model, temperature=temperature, response_format={"type": "json_object"}
-        )
-    except Exception:  # noqa: BLE001  某些厂商不认 response_format，直接降级
-        raw = client.chat(messages, model=model, temperature=temperature)
+    return _json_call(
+        client,
+        messages,
+        model,
+        temperature,
+        validator,
+        schema_hint,
+        hint_style="team",
+        retry_style="team",
+    )
 
-    for attempt in (1, 2):
-        try:
-            return validator.model_validate_json(_strip_fence(raw)), raw
-        except (ValidationError, json.JSONDecodeError) as e:
-            if attempt == 2:
-                return None, raw
-            hint = (
-                _validation_hint(e)
-                if isinstance(e, ValidationError)
-                else f"- 输出不是合法 JSON：{e}"
-            )
-            # 自纠：把报错和原文一起递回去，让它照着改
-            messages = messages + [
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": f"你上一次的输出没能通过校验：\n{hint}\n\n"
-                    f"请按下面的结构重新输出（只输出 JSON）：\n{schema_hint}",
-                },
-            ]
-            raw = client.chat(messages, model=model, temperature=temperature)
-    return None, raw
-
-
-def _strip_fence(text: str) -> str:
-    """模型很喜欢用 ```json ... ``` 把 JSON 包起来，去掉它。"""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.split("\n", 1)[-1]
-    if t.endswith("```"):
-        t = t.rsplit("```", 1)[0]
-    return t.strip()
 
 
 PLAN_SCHEMA_HINT = (

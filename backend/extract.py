@@ -17,6 +17,7 @@ from typing import Any, Literal, Optional, get_args
 from openai import BadRequestError  # noqa: F401  # 仅用于 isinstance 兜底检测
 from pydantic import BaseModel, ValidationError, create_model
 
+from _jsonutil import validation_hint as _validation_hint
 from llm import LLMClient
 from schemas import ExtractRequest, ExtractResponse, FieldSpec
 
@@ -70,15 +71,6 @@ def _build_messages(text: str, specs: list[FieldSpec]) -> list[dict]:
     return [{"role": "user", "content": "\n".join(lines)}]
 
 
-def _validation_hint(err: ValidationError) -> str:
-    """把 Pydantic 的 ValidationError 缩成对模型友好的一段中文提示。"""
-    parts: list[str] = []
-    for e in err.errors():
-        loc = ".".join(str(x) for x in e["loc"])
-        parts.append(f"{loc}: {e['msg']}（期望类型 {e['type']}）")
-    return "; ".join(parts)
-
-
 def extract_one(client: LLMClient, req: ExtractRequest) -> ExtractResponse:
     model_cls = build_model(req.fields)
     messages = _build_messages(req.text, req.fields)
@@ -107,7 +99,7 @@ def extract_one(client: LLMClient, req: ExtractRequest) -> ExtractResponse:
         try:
             parsed = model_cls.model_validate_json(raw)
         except ValidationError as ve:
-            error_msg = _validation_hint(ve)
+            error_msg = _validation_hint(ve, style="extract")
             # 第二次再答时，把"上次原文 + 错误原因"塞回去，让模型自纠
             messages = messages + [
                 {"role": "assistant", "content": raw},

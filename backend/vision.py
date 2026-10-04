@@ -36,6 +36,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, Field, ValidationError
 
+from _jsonutil import strip_fence as _strip_fence
 from llm import LLMClient
 
 # ---------- ① 确定性解析：格式白名单 + 魔数嗅探 + 尺寸提取 ----------
@@ -238,15 +239,6 @@ class ExtractField(BaseModel):
 class ExtractResult(BaseModel):
     summary: str = ""
     fields: list[ExtractField] = Field(default_factory=list)
-
-
-def _strip_fence(text: str) -> str:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1]
-        if s.endswith("```"):
-            s = s[: -3]
-    return s.strip()
 
 
 def build_messages(

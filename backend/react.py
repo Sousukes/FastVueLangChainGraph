@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 import graph
 import rag
+from _jsonutil import safe_args as _safe_args
 from llm import LLMClient
 from tools import TOOLS, execute_tool
 
@@ -416,13 +417,6 @@ def _render(result: Any, error: str | None) -> tuple[str, bool]:
     if isinstance(result, str):
         return result, True
     return json.dumps(result, ensure_ascii=False), True
-
-
-def _safe_args(raw: str) -> Any:
-    try:
-        return json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return raw
 
 
 def _signature(name: str, args: Any) -> str:

@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import math
 import time
 from typing import Any, Iterator
@@ -341,15 +340,6 @@ def build_task(order_id: str, amount: str, date: str) -> str:
 # ---------------------------------------------------------------------------
 # 动作执行
 # ---------------------------------------------------------------------------
-
-
-def _safe_args(raw: str) -> dict:
-    """解析 tool_call 的 arguments。模型偶尔会吐出坏 JSON —— 坏就当空参数，别抛。"""
-    try:
-        data = json.loads(raw or "{}")
-    except Exception:  # noqa: BLE001
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _norm_action(name: Any) -> str:

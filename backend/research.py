@@ -21,9 +21,10 @@
     rag.hybrid_search             —— 自适应检索落空时的兜底单轮检索
 
 ⚠️ 关于「JSON + 校验 + 一次自纠」：与阶段 11（team）、13（agentic）、14（search）
-   同源，本文件自带一份紧凑实现（见 _json_call）。阶段 12 的规矩是「第三次才抽框架」，
-   这里已是第四处，但下沉到 llm.py 会波及已发布的 team/agentic 与各自的殉测试，
-   收益不抵风险，故沿用「各自持有一份」的既定做法，并在下方 TECH_DEBT 记一笔。
+   同源。阶段 12 立过一条规矩「第三次才抽框架」——前两次手写是为了讲清原理。
+   本阶段曾是第四处，当时判断「下沉会波及已发布阶段与其静态测试，收益不抵风险」
+   而记了 TECH_DEBT 账；**阶段 18B 已结清**：实现下沉到 _jsonutil.py，
+   各阶段的差异（hint 风格、自纠提示语）改为参数保留。
 
 统一 SSE 事件协议（与阶段 10–14 一致，一帧一行）：
     start / plan / section_start / section_retrieve / section_answer_delta /
@@ -37,8 +38,9 @@ import re
 import time
 from typing import Any, Iterator
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from _jsonutil import json_call as _json_call
 import rag
 import agentic
 import search
@@ -49,69 +51,16 @@ from llm import LLMClient
 _CITE_RE = re.compile(r"\[(\d+)\]")
 
 
-# ---------- 结构化输出：规划 + 忠实性（阶段 04 的招式，本地持有一份） ----------
+# ---------- 结构化输出：规划 + 忠实性（阶段 04 的招式，已下沉到 _jsonutil） ----------
 
-TECH_DEBT = (
-    "阶段 11/13/14/15 各自持有一份 _json_call（JSON 模式 + Pydantic 校验 + 自纠）。"
-    "按阶段 12 规矩应在第三次抽框架，现第四次仍分散——下次若再出现，应下沉到 llm.py "
-    "并同步更新各 _t_*_static.py 的 ScriptedClient 分流。"
-)
-
-
-def _strip_fence(text: str) -> str:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1]
-        if s.endswith("```"):
-            s = s[: -3]
-    return s.strip()
-
-
-def _validation_hint(e: ValidationError) -> str:
-    return "\n".join(
-        f"- 字段 {'.'.join(str(x) for x in err['loc'])}：{err['msg']}" for err in e.errors()
-    )
-
-
-def _json_call(
-    client: LLMClient,
-    messages: list[dict],
-    model: str | None,
-    temperature: float,
-    validator: type[BaseModel],
-    schema_hint: str,
-) -> tuple[BaseModel | None, str]:
-    """JSON 模式 + Pydantic 校验 + 一次自纠重试，返回 (对象 | None, 原文)。"""
-    try:
-        raw = client.chat(
-            messages, model=model, temperature=temperature, response_format={"type": "json_object"}
-        )
-    except Exception:  # noqa: BLE001  某些厂商不认 response_format，直接降级
-        raw = client.chat(messages, model=model, temperature=temperature)
-
-    for attempt in (1, 2):
-        try:
-            return validator.model_validate_json(_strip_fence(raw)), raw
-        except (ValidationError, json.JSONDecodeError) as e:
-            if attempt == 2:
-                return None, raw
-            hint = (
-                _validation_hint(e)
-                if isinstance(e, ValidationError)
-                else f"- 输出不是合法 JSON：{e}"
-            )
-            messages = messages + [
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        f"你的输出没能通过校验：\n{hint}\n\n"
-                        f"请严格按下面的 JSON 重来一次，不要加解释：\n{schema_hint}"
-                    ),
-                },
-            ]
-            raw = client.chat(messages, model=model, temperature=temperature)
-    return None, raw  # pragma: no cover
+# ✅ 阶段 18B 结清：原先这里记着一笔技术债 ——
+#   「阶段 11/13/14/15 各自持有一份 _json_call，按阶段 12 规矩应在第三次抽框架，
+#     现第四次仍分散 —— 下沉到 llm.py 会波及已发布的 team/agentic 与各自静态测试，
+#     收益不抵风险。」
+#   当时的判断没错，但拦路的两个成本后来消失了：差异被显式参数化（hint/retry 风格），
+#   静态测试也只走公开 API。故下沉为 _jsonutil.py，本阶段用标准版（retry_style="std"）。
+#   记在这里是因为「第三次才抽框架」这条规矩本身值得记住：
+#   **前两次手写是为了讲清原理，不是为了偷懒。**
 
 
 # ---------- 规划：把问题拆成研究大纲 ----------

@@ -42,10 +42,12 @@
 ⭐ 关于「结构化输出 + 自纠」这段逻辑的重用
 
 这里又需要一次「JSON 模式 + Pydantic 校验 + 一次自纠」（阶段 04 的招式，
-阶段 11 的 team._chat_json 是第二处）。阶段 12 定过规矩：
-**一份逻辑出现第三次，才值得抽成框架**——agentic 是第三处了，本该抽。
-但抽到 `llm.py` 会波及阶段 11 已发布的代码与两处殉测试，收益不抵风险。
-所以本文件自带一份紧凑实现，并把这笔技术债显式记在下方的 TECH_DEBT 注释里。
+阶段 11 的 team 用了第二处）。阶段 12 定过规矩：
+**一份逻辑出现第三次，才值得抽成框架**——本阶段正是第三处，当时该抽，
+但「抽到 `llm.py` 会波及阶段 11 已发布代码与其静态测试，收益不抵风险」，
+于是自带一份并把技术债记在下方。
+**阶段 18B 已结清**：实现下沉到 `_jsonutil.py`（差异用参数保留），
+拦路的两个成本后来都不成立了 —— 静态测试只走公开 API，差异也只是文案。
 """
 
 from __future__ import annotations
@@ -54,15 +56,18 @@ import json
 import time
 from typing import Any, Iterator
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from _jsonutil import json_call as _json_call
 import graph
 import rag
 from llm import LLMClient
 
-# ⚠️ 技术债（阶段 13 记账）：_json_call / _strip_fence / _validation_hint
-#    与 team.py 里的同名逻辑重复。下一处再需要时（第三次），应连同 team.py
-#    一起下沉到 llm.py 或新建 llmkit/，并同步更新 _t_team_static.py。
+# ✅ 阶段 18B 结清：原先的「阶段 13 记账」技术债已处理。
+#    _json_call / _strip_fence / _validation_hint 的重复实现下沉到 _jsonutil.py，
+#    差异（自纠提示语、hint 风格）改为参数保留，而不是抹平。
+#    当时的顾虑「会波及 _t_team_static.py」已不成立 —— 静态测试只走公开 API。
+#    教训留在这里：当第 N 次复制同一段逻辑时，先问「这次和上次的差异是刻意的吗」。
 
 
 # ---------- 提示词：每个决策点一个，职责单一 ----------
@@ -134,68 +139,11 @@ class RewritePlan(BaseModel):
 
 
 # ---------- 「JSON + 校验 + 一次自纠」 ----------
-
-
-def _strip_fence(text: str) -> str:
-    """模型有时会把 JSON 包在 ```json ... ``` 里，剥掉再解析。"""
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1]
-        if s.endswith("```"):
-            s = s[: -3]
-    return s.strip()
-
-
-def _validation_hint(e: ValidationError) -> str:
-    return "\n".join(
-        f"- 字段 {'.'.join(str(x) for x in err['loc'])}：{err['msg']}" for err in e.errors()
-    )
-
-
-def _json_call(
-    client: LLMClient,
-    messages: list[dict],
-    model: str | None,
-    temperature: float,
-    validator: type[BaseModel],
-    schema_hint: str,
-) -> tuple[BaseModel | None, str]:
-    """JSON 模式 + Pydantic 校验 + **一次自纠重试**，返回 (对象 | None, 原文)。
-
-    三个决策点（route / grade / rewrite）都收口到这里：让多智能体那边的经验
-    （角色之间的接口要像函数签名一样硬）在这里同样成立——**决策结果必须是结构化对象**，
-    绝不能让模型自由发挥一段话，然后由下游去猜。
-    """
-    try:
-        raw = client.chat(
-            messages, model=model, temperature=temperature, response_format={"type": "json_object"}
-        )
-    except Exception:  # noqa: BLE001  某些厂商不认 response_format，直接降级
-        raw = client.chat(messages, model=model, temperature=temperature)
-
-    for attempt in (1, 2):
-        try:
-            return validator.model_validate_json(_strip_fence(raw)), raw
-        except (ValidationError, json.JSONDecodeError) as e:
-            if attempt == 2:
-                return None, raw
-            hint = (
-                _validation_hint(e)
-                if isinstance(e, ValidationError)
-                else f"- 输出不是合法 JSON：{e}"
-            )
-            messages = messages + [
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        f"你的输出没能通过校验：\n{hint}\n\n"
-                        f"请严格按下面的 JSON 重来一次，不要加解释：\n{schema_hint}"
-                    ),
-                },
-            ]
-            raw = client.chat(messages, model=model, temperature=temperature)
-    return None, raw  # pragma: no cover
+# 阶段 18B 起从 _jsonutil 导入；本阶段用的是标准版自纠提示语（retry_style="std"）。
+#
+# 为什么这个阶段需要它：三个决策点（route / grade / rewrite）都收口到 json_call，
+# 让多智能体那边的经验（角色之间的接口要像函数签名一样硬）在这里同样成立
+# ——**决策结果必须是结构化对象**，绝不能让模型自由发挥一段话，然后由下游去猜。
 
 
 # ---------- 检索通道：按轮次升级，复用阶段 07 / 08 / 09 ----------

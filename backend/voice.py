@@ -31,7 +31,8 @@ ASR/TTS 服务与密钥，收益为零、复杂度暴涨。**先想清楚边界�
 这两件事都值得一次 LLM 调用，也都**可被验证**（前者甚至可以用确定性规则验证）。
 
 复用资产：`llm.LLMClient.stream`（口语化改写要**边想边念**）、阶段 04 的
-「JSON + Pydantic 校验 + 一次自纠」招式（本文件自带一份紧凑实现，见 `_json_call`）。
+「JSON + Pydantic 校验 + 一次自纠」招式（阶段 18B 起实现在 `_jsonutil.py`，
+  本阶段以标准版调用）。
 
 统一 SSE 事件协议（与阶段 10–16 一致，一帧一行）：
     start / answer_delta / rewrite / speak / finish / error
@@ -44,8 +45,9 @@ import re
 import time
 from typing import Any, Iterator
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
+from _jsonutil import json_call as _json_call
 from llm import LLMClient
 
 # ---------- 输入校验 ----------
@@ -196,71 +198,11 @@ class SpeakPlan(BaseModel):
     terms: list[SpeakTerm] = Field(default_factory=list)
 
 
-def _strip_fence(text: str) -> str:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1]
-        if s.endswith("```"):
-            s = s[: -3]
-    return s.strip()
-
-
-def _validation_hint(e: ValidationError) -> str:
-    return "\n".join(
-        f"- 字段 {'.'.join(str(x) for x in err['loc'])}：{err['msg']}" for err in e.errors()
-    )
-
-
-def _json_call(
-    client: LLMClient,
-    messages: list[dict],
-    model: str | None,
-    temperature: float,
-    validator: type[BaseModel],
-    schema_hint: str,
-) -> tuple[BaseModel | None, str]:
-    """JSON 模式 + Pydantic 校验 + 一次自纠重试，返回 (对象 | None, 原文)。
-
-    与阶段 11/13/14/15/16 同源，本文件自带一份紧凑实现（见下方 TECH_DEBT）。
-    """
-    try:
-        raw = client.chat(
-            messages, model=model, temperature=temperature, response_format={"type": "json_object"}
-        )
-    except Exception:  # noqa: BLE001  某些厂商不认 response_format，直接降级
-        raw = client.chat(messages, model=model, temperature=temperature)
-
-    for attempt in (1, 2):
-        try:
-            return validator.model_validate_json(_strip_fence(raw)), raw
-        except (ValidationError, json.JSONDecodeError) as e:
-            if attempt == 2:
-                return None, raw
-            hint = (
-                _validation_hint(e)
-                if isinstance(e, ValidationError)
-                else f"- 输出不是合法 JSON：{e}"
-            )
-            messages = messages + [
-                {"role": "assistant", "content": raw},
-                {
-                    "role": "user",
-                    "content": (
-                        f"你的输出没能通过校验：\n{hint}\n\n"
-                        f"请严格按下面的 JSON 重来一次，不要加解释：\n{schema_hint}"
-                    ),
-                },
-            ]
-            raw = client.chat(messages, model=model, temperature=temperature)
-    return None, raw  # pragma: no cover
-
-
-TECH_DEBT = (
-    "阶段 11/13/14/15/16/17 各自持有一份 _json_call（JSON 模式 + Pydantic 校验 + 自纠）。"
-    "按阶段 12 规矩应在第三次抽框架，现已第六处——下次若再出现，应下沉到 llm.py "
-    "并同步更新各 _t_*_static.py 的 ScriptedClient 分流。"
-)
-
+# ✅ 阶段 18B 结清：原 TECH_DEBT（「阶段 11/13/14/15/16/17 各自持有一份 _json_call，
+#   按阶段 12 规矩应在第三次抽框架，现第六处 —— 下次若再出现应下沉到 llm.py
+#   并同步更新各 _t_*_static.py 的 ScriptedClient 分流」）已处理。
+#   实现下沉到 _jsonutil.py，本阶段用标准版自纠提示语（retry_style="std"）。
+#   拦路的成本后来消失了：差异参数化 + 静态测试只走公开 API。
 
 def _normalize(
     client: LLMClient, answer: str, model: str | None, temperature: float
